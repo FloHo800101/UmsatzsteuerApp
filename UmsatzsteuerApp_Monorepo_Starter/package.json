@@ -1,0 +1,15 @@
+{
+  "name": "umsatzsteuerapp",
+  "private": true,
+  "workspaces": [
+    "frontend",
+    "services/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:frontend": "npm -w frontend run dev",
+    "build:frontend": "npm -w frontend run build",
+    "test:frontend": "npm -w frontend run test",
+    "test:services": "npm -w services/api-gateway run test && npm -w services/extractor-mock run test && npm -w services/elster-adapter-mock run test && npm -w services/exporter run test"
+  }
+}

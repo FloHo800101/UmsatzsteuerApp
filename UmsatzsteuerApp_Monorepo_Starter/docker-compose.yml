@@ -1,0 +1,14 @@
+version: '3.9'
+services:
+  api-gateway:
+    build: ./services/api-gateway
+    ports: ["8080:8080"]
+  extractor-mock:
+    build: ./services/extractor-mock
+    ports: ["8081:8081"]
+  elster-adapter-mock:
+    build: ./services/elster-adapter-mock
+    ports: ["8082:8082"]
+  exporter:
+    build: ./services/exporter
+    ports: ["8083:8083"]
