@@ -24,13 +24,19 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - run: npm i
-      - run: npm -w frontend ci || npm -w frontend i
-      - run: npm -w frontend run build
-      - run: |
-          # SPA-Fallback, damit Deep-Links funktionieren
-          cp frontend/dist/index.html frontend/dist/404.html
-      - uses: actions/upload-pages-artifact@v3
+
+      # 👉 Install & Build NUR im frontend-Workspace
+      - name: Install frontend deps
+        run: npm -w frontend ci || npm -w frontend i
+
+      - name: Build frontend
+        run: npm -w frontend run build
+
+      - name: SPA 404 fallback
+        run: cp frontend/dist/index.html frontend/dist/404.html
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
         with:
           path: ./frontend/dist
 
