@@ -19,36 +19,52 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-
-    # 🔑 Alle "run:"-Schritte standardmäßig im Ordner ./frontend ausführen
-    defaults:
-      run:
-        working-directory: frontend
-
     steps:
       - uses: actions/checkout@v4
+
+      - name: Debug repo tree
+        run: |
+          pwd
+          ls -la
+          echo "----"
+          ls -la UmsatzsteuerApp_Monorepo_Starter || true
+          echo "----"
+          ls -la frontend || true
+
+      # 🔎 Frontend-Verzeichnis automatisch ermitteln
+      - name: Determine FRONTEND_DIR
+        id: detect
+        run: |
+          if [ -f "frontend/package.json" ]; then
+            echo "FRONTEND_DIR=frontend" >> $GITHUB_ENV
+          elif [ -f "UmsatzsteuerApp_Monorepo_Starter/frontend/package.json" ]; then
+            echo "FRONTEND_DIR=UmsatzsteuerApp_Monorepo_Starter/frontend" >> $GITHUB_ENV
+          else
+            echo "Konnte kein frontend/package.json finden." >&2
+            exit 1
+          fi
+          echo "Using frontend dir: ${FRONTEND_DIR}"
 
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      # Install im ./frontend (kein Workspace am Root nötig)
       - name: Install deps
+        working-directory: ${{ env.FRONTEND_DIR }}
         run: npm ci || npm i
 
-      # Build im ./frontend
       - name: Build
+        working-directory: ${{ env.FRONTEND_DIR }}
         run: npm run build
 
-      # SPA-Fallback anlegen (beachte: jetzt relativ zu ./frontend)
       - name: SPA 404 fallback
-        run: cp dist/index.html dist/404.html
+        working-directory: ${{ env.FRONTEND_DIR }}/dist
+        run: cp index.html 404.html
 
-      # Artifact-Pfad relativ zum Repo-Root angeben
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ./frontend/dist
+          path: ${{ env.FRONTEND_DIR }}/dist
 
   deploy:
     runs-on: ubuntu-latest
