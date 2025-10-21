@@ -25,13 +25,17 @@ jobs:
         with:
           node-version: '20'
 
-      # 👉 Install & Build NUR im frontend-Workspace
+      # Install nur im ./frontend
       - name: Install frontend deps
-        run: npm -w frontend ci || npm -w frontend i
+        working-directory: frontend
+        run: npm ci || npm i
 
+      # Build nur im ./frontend
       - name: Build frontend
-        run: npm -w frontend run build
+        working-directory: frontend
+        run: npm run build
 
+      # SPA-Fallback (aus Repo-Root auf den Build-Pfad zugreifen)
       - name: SPA 404 fallback
         run: cp frontend/dist/index.html frontend/dist/404.html
 
