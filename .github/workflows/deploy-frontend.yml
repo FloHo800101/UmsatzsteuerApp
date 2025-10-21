@@ -19,26 +19,32 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+
+    # 🔑 Alle "run:"-Schritte standardmäßig im Ordner ./frontend ausführen
+    defaults:
+      run:
+        working-directory: frontend
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      # Install nur im ./frontend
-      - name: Install frontend deps
-        working-directory: frontend
+      # Install im ./frontend (kein Workspace am Root nötig)
+      - name: Install deps
         run: npm ci || npm i
 
-      # Build nur im ./frontend
-      - name: Build frontend
-        working-directory: frontend
+      # Build im ./frontend
+      - name: Build
         run: npm run build
 
-      # SPA-Fallback (aus Repo-Root auf den Build-Pfad zugreifen)
+      # SPA-Fallback anlegen (beachte: jetzt relativ zu ./frontend)
       - name: SPA 404 fallback
-        run: cp frontend/dist/index.html frontend/dist/404.html
+        run: cp dist/index.html dist/404.html
 
+      # Artifact-Pfad relativ zum Repo-Root angeben
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
