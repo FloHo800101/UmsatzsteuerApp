@@ -5,6 +5,9 @@ import { componentTagger } from "lovable-tagger";
 
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => ({
+  // ⬇️ WICHTIG für GitHub Pages:
+  base: mode === "production" ? "/UmsatzsteuerApp/" : "/",
+
   server: {
     host: "::",
     port: 8080,
