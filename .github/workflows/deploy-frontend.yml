@@ -5,7 +5,7 @@ on:
     branches: [ main ]
     paths:
       - 'frontend/**'
-      - '.github/workflows/deploy-frontend.yml'   # <- exakt dieser Pfad
+      - '.github/workflows/deploy-frontend.yml'   # exakt dieser Pfad
   workflow_dispatch: {}  # erlaubt manuelles Starten
 
 permissions:
@@ -24,7 +24,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # zur Übersicht: Verzeichnisbaum ausgeben
+      # Übersicht im Log
       - name: Debug repo tree
         run: |
           pwd
@@ -34,7 +34,7 @@ jobs:
           echo "----"
           ls -la frontend || true
 
-      # 🔎 Frontend-Verzeichnis automatisch ermitteln
+      # Frontend-Verzeichnis automatisch ermitteln
       - name: Determine FRONTEND_DIR
         id: detect
         run: |
@@ -49,7 +49,11 @@ jobs:
             exit 1
           fi
 
-      # Node mit Cache für stabile/schnelle Builds
+      # Repo-Name (für Prüfungen)
+      - name: Export REPO_NAME
+        run: echo "REPO_NAME=${{ github.event.repository.name }}" >> $GITHUB_ENV
+
+      # Node mit Cache
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -61,22 +65,43 @@ jobs:
         working-directory: ${{ env.FRONTEND_DIR }}
         run: npm ci || npm i
 
+      # Build (wir geben REPO_NAME auch an Vite, falls die Config es nutzt)
       - name: Build
         working-directory: ${{ env.FRONTEND_DIR }}
+        env:
+          VITE_BASE: "/${{ env.REPO_NAME }}/"
         run: npm run build
 
-      # SPA-Fallback: Deep-Links auf Client-Routen funktionieren
+      # .nojekyll verhindert Jekyll-Eigenheiten
+      - name: Add .nojekyll
+        run: |
+          touch "${{ env.FRONTEND_DIR }}/dist/.nojekyll"
+
+      # SPA-Fallback (Deep-Links)
       - name: SPA 404 fallback
         working-directory: ${{ env.FRONTEND_DIR }}/dist
         run: cp index.html 404.html
 
-      # Sichtprüfung: Ist das Artifact korrekt aufgebaut?
+      # Sichtprüfung: Inhalt von dist
       - name: Inspect dist contents
         run: |
           echo "Listing dist:" && ls -la ${{ env.FRONTEND_DIR }}/dist
           echo "Finding files:" && find ${{ env.FRONTEND_DIR }}/dist -maxdepth 2 -type f -print
 
-      # Upload an Pages (nimmt genau den dist-Ordner)
+      # Konsistenz-Check: stimmt der Base-Pfad in index.html mit dem Repo-Namen überein?
+      - name: Verify base path in index.html
+        run: |
+          FILE="${{ env.FRONTEND_DIR }}/dist/index.html"
+          BASE="/${{ env.REPO_NAME }}/"
+          echo "Expecting asset paths to include: ${BASE}"
+          if ! grep -q "${BASE}assets/" "$FILE"; then
+            echo "FEHLER: In index.html wurde der erwartete Base-Pfad '${BASE}' nicht gefunden."
+            echo "Bitte Vite 'base' prüfen."
+            exit 1
+          fi
+          echo "Base-Pfad gefunden."
+
+      # Upload an Pages
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
@@ -92,3 +117,23 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+      # Live-Verifikation: Seite abrufen und Status ausgeben
+      - name: Verify live page
+        run: |
+          URL="${{ steps.deployment.outputs.page_url }}"
+          echo "Checking live URL: $URL"
+          for i in 1 2 3; do
+            echo "Attempt $i..."
+            code=$(curl -s -o /dev/null -w "%{http_code}" "$URL")
+            echo "HTTP $code"
+            if [ "$code" = "200" ] || [ "$code" = "404" ]; then
+              # Bei SPA-Fallback liefert GitHub Pages bei Deep-Links 404-Status mit unserer 404.html (ok).
+              # Am Root sollte aber 200 kommen. Wir dumpen ein paar Zeilen Inhalt zu Diagnose-Zwecken:
+              echo "---- first bytes ----"
+              curl -s "$URL" | head -n 20
+              echo "---------------------"
+              break
+            fi
+            sleep 3
+          done
