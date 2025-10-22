@@ -2,8 +2,7 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react-swc";
 import path from "path";
 
-// Hinweis: lovable-tagger nur in DEV verwenden (und dynamisch importieren),
-// damit der Build auf GitHub Pages ohne das Paket funktioniert.
+// Hinweis: lovable-tagger nur in DEV verwenden
 export default defineConfig(async ({ mode }) => {
   const plugins = [react()];
 
@@ -18,10 +17,11 @@ export default defineConfig(async ({ mode }) => {
     }
   }
 
-  return {
-    // WICHTIG für GitHub Pages: REPO-Namen exakt einsetzen
-    base: mode === "production" ? "/UmsatzsteuerApp/" : "/",
+  // Robust: zuerst VITE_BASE (vom Workflow), sonst fixer Fallback
+  const repoBase = process.env.VITE_BASE ?? "/UmsatzsteuerApp/";
 
+  return {
+    base: mode === "production" ? repoBase : "/",
     server: {
       host: "::",
       port: 8080,
