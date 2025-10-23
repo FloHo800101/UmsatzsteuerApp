@@ -1,0 +1,16 @@
+node_modules
+dist
+.git
+.github
+services
+Dockerfile
+docker-compose.yml
+docker/
+.env*
+# Schutz unserer Monorepo-Anpassungen:
+src/App.tsx
+vite.config.ts
+vite.config.js
+package.json
+package-lock.json
+
