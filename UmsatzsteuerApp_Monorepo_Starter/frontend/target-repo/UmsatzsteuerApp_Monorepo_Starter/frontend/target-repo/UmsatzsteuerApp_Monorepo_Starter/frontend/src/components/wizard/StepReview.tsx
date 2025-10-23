@@ -4,8 +4,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { Pencil, Save, X, HelpCircle } from "lucide-react";
+import { Pencil, Save, X } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 interface Entry {
@@ -21,7 +20,6 @@ interface Entry {
   skr03: string;
   skr04: string;
   source: string;
-  paymentMethod: "bar" | "kreditkarte" | "konto" | "sonstige";
 }
 
 interface StepReviewProps {
@@ -43,7 +41,6 @@ const StepReview = ({ period }: StepReviewProps) => {
       skr03: "4910",
       skr04: "6805",
       source: "Rechnung_Amazon_2025-09-15.pdf",
-      paymentMethod: "konto",
     },
     {
       id: "2",
@@ -58,7 +55,6 @@ const StepReview = ({ period }: StepReviewProps) => {
       skr03: "4910",
       skr04: "6805",
       source: "Beleg_Telekom_089.pdf",
-      paymentMethod: "konto",
     },
     {
       id: "3",
@@ -73,7 +69,6 @@ const StepReview = ({ period }: StepReviewProps) => {
       skr03: "4930",
       skr04: "6815",
       source: "Quittung_Bürobedarf.jpg",
-      paymentMethod: "kreditkarte",
     },
     {
       id: "4",
@@ -88,7 +83,6 @@ const StepReview = ({ period }: StepReviewProps) => {
       skr03: "4945",
       skr04: "6825",
       source: "Quittung_Bürobedarf.jpg",
-      paymentMethod: "bar",
     },
   ]);
   
@@ -137,10 +131,9 @@ const StepReview = ({ period }: StepReviewProps) => {
   );
 
   return (
-    <TooltipProvider>
-      <div className="space-y-6">
-        {/* Summary Cards */}
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+    <div className="space-y-6">
+      {/* Summary Cards */}
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <div className="p-4 rounded-lg bg-secondary border border-border">
           <div className="text-sm text-muted-foreground mb-1">Netto gesamt</div>
           <div className="text-2xl font-bold">€{totals.net.toFixed(2)}</div>
@@ -165,138 +158,17 @@ const StepReview = ({ period }: StepReviewProps) => {
           <Table>
             <TableHeader>
               <TableRow className="bg-muted/50">
-                <TableHead className="w-[100px]">
-                  <Tooltip>
-                    <TooltipTrigger className="flex items-center gap-1">
-                      Datum
-                      <HelpCircle className="h-3.5 w-3.5 text-muted-foreground" />
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      <p>Rechnungs- oder Belegdatum</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </TableHead>
-                <TableHead>
-                  <Tooltip>
-                    <TooltipTrigger className="flex items-center gap-1">
-                      Partner
-                      <HelpCircle className="h-3.5 w-3.5 text-muted-foreground" />
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      <p>Name des Lieferanten oder Kunden</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </TableHead>
-                <TableHead>
-                  <Tooltip>
-                    <TooltipTrigger className="flex items-center gap-1">
-                      Leistungsart
-                      <HelpCircle className="h-3.5 w-3.5 text-muted-foreground" />
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      <p>Art der Leistung oder Ware</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </TableHead>
-                <TableHead className="w-[80px]">
-                  <Tooltip>
-                    <TooltipTrigger className="flex items-center gap-1">
-                      Kz
-                      <HelpCircle className="h-3.5 w-3.5 text-muted-foreground" />
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      <p>UStVA-Kennziffer für ELSTER</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </TableHead>
-                <TableHead className="text-right">
-                  <Tooltip>
-                    <TooltipTrigger className="flex items-center gap-1 justify-end">
-                      Netto €
-                      <HelpCircle className="h-3.5 w-3.5 text-muted-foreground" />
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      <p>Nettobetrag ohne Umsatzsteuer</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </TableHead>
-                <TableHead className="text-center w-[90px]">
-                  <Tooltip>
-                    <TooltipTrigger className="flex items-center gap-1 justify-center">
-                      USt-Satz
-                      <HelpCircle className="h-3.5 w-3.5 text-muted-foreground" />
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      <p>Umsatzsteuersatz: 7% (ermäßigt) oder 19% (regulär)</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </TableHead>
-                <TableHead className="text-right">
-                  <Tooltip>
-                    <TooltipTrigger className="flex items-center gap-1 justify-end">
-                      USt €
-                      <HelpCircle className="h-3.5 w-3.5 text-muted-foreground" />
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      <p>Umsatzsteuerbetrag</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </TableHead>
-                <TableHead className="text-right">
-                  <Tooltip>
-                    <TooltipTrigger className="flex items-center gap-1 justify-end">
-                      Brutto €
-                      <HelpCircle className="h-3.5 w-3.5 text-muted-foreground" />
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      <p>Bruttobetrag inkl. Umsatzsteuer</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </TableHead>
-                <TableHead className="w-[100px]">
-                  <Tooltip>
-                    <TooltipTrigger className="flex items-center gap-1">
-                      Zahlungsart
-                      <HelpCircle className="h-3.5 w-3.5 text-muted-foreground" />
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      <p>Zahlungsmethode (Bar, Kreditkarte, Konto, Sonstige)</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </TableHead>
-                <TableHead className="w-[80px]">
-                  <Tooltip>
-                    <TooltipTrigger className="flex items-center gap-1">
-                      SKR03
-                      <HelpCircle className="h-3.5 w-3.5 text-muted-foreground" />
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      <p>Kontenrahmen SKR03 (Vorschlag)</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </TableHead>
-                <TableHead className="w-[80px]">
-                  <Tooltip>
-                    <TooltipTrigger className="flex items-center gap-1">
-                      SKR04
-                      <HelpCircle className="h-3.5 w-3.5 text-muted-foreground" />
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      <p>Kontenrahmen SKR04 (Vorschlag)</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </TableHead>
-                <TableHead className="w-[100px]">
-                  <Tooltip>
-                    <TooltipTrigger className="flex items-center gap-1">
-                      Quelle
-                      <HelpCircle className="h-3.5 w-3.5 text-muted-foreground" />
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      <p>Ursprungs-Belegdatei</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </TableHead>
+                <TableHead className="w-[100px]">Datum</TableHead>
+                <TableHead>Partner</TableHead>
+                <TableHead>Leistungsart</TableHead>
+                <TableHead className="w-[80px]">Kz</TableHead>
+                <TableHead className="text-right">Netto €</TableHead>
+                <TableHead className="text-center w-[90px]">USt-Satz</TableHead>
+                <TableHead className="text-right">USt €</TableHead>
+                <TableHead className="text-right">Brutto €</TableHead>
+                <TableHead className="w-[80px]">SKR03</TableHead>
+                <TableHead className="w-[80px]">SKR04</TableHead>
+                <TableHead className="w-[100px]">Quelle</TableHead>
                 <TableHead className="w-[80px]"></TableHead>
               </TableRow>
             </TableHeader>
@@ -380,28 +252,6 @@ const StepReview = ({ period }: StepReviewProps) => {
                     <TableCell className="text-right font-mono font-medium">
                       {data.gross.toFixed(2)}
                     </TableCell>
-                    <TableCell>
-                      {isEditing ? (
-                        <Select
-                          value={data.paymentMethod}
-                          onValueChange={(value) => setEditData({ ...data, paymentMethod: value as "bar" | "kreditkarte" | "konto" | "sonstige" })}
-                        >
-                          <SelectTrigger className="h-8">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="bar">Bar</SelectItem>
-                            <SelectItem value="kreditkarte">Kreditkarte</SelectItem>
-                            <SelectItem value="konto">Konto</SelectItem>
-                            <SelectItem value="sonstige">Sonstige</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      ) : (
-                        <Badge variant="outline" className="capitalize">
-                          {data.paymentMethod}
-                        </Badge>
-                      )}
-                    </TableCell>
                     <TableCell className="text-sm text-muted-foreground">{data.skr03}</TableCell>
                     <TableCell className="text-sm text-muted-foreground">{data.skr04}</TableCell>
                     <TableCell className="text-xs text-muted-foreground truncate max-w-[100px]" title={data.source}>
@@ -431,14 +281,13 @@ const StepReview = ({ period }: StepReviewProps) => {
         </div>
       </div>
 
-        <div className="p-4 bg-warning/5 border border-warning/20 rounded-lg text-sm">
-          <div className="font-medium mb-1">⚠️ Validierung</div>
-          <div className="text-muted-foreground">
-            Bitte überprüfen Sie alle Einträge sorgfältig. Nur USt-Sätze von 7% und 19% sind im MVP unterstützt.
-          </div>
+      <div className="p-4 bg-warning/5 border border-warning/20 rounded-lg text-sm">
+        <div className="font-medium mb-1">⚠️ Validierung</div>
+        <div className="text-muted-foreground">
+          Bitte überprüfen Sie alle Einträge sorgfältig. Nur USt-Sätze von 7% und 19% sind im MVP unterstützt.
         </div>
       </div>
-    </TooltipProvider>
+    </div>
   );
 };
 
