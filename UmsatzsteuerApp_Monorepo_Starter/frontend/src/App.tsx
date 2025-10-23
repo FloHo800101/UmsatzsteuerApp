@@ -9,12 +9,21 @@ import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
 
+/**
+ * GitHub Pages: Die App liegt unter /UmsatzsteuerApp/.
+ * Vite setzt import.meta.env.BASE_URL entsprechend der vite.config.ts (z. B. "/UmsatzsteuerApp/").
+ * Wir entfernen den evtl. abschließenden Slash, damit React Router einen sauberen basename erhält.
+ * - Dev (base="/")  -> basename = ""
+ * - Prod (base="/UmsatzsteuerApp/") -> basename = "/UmsatzsteuerApp"
+ */
+const BASENAME = (import.meta.env.BASE_URL ?? "/").replace(/\/$/, "");
+
 const App = () => (
   <QueryClientProvider client={queryClient}>
     <TooltipProvider>
       <Toaster />
       <Sonner />
-      <BrowserRouter>
+      <BrowserRouter basename={BASENAME}>
         <Routes>
           <Route path="/" element={<Index />} />
           <Route path="/wizard" element={<WizardWrapper />} />
