@@ -2,7 +2,6 @@ import React, { useMemo, useRef, useState } from "react";
 
 /**
  * API-Basis: zuerst ENV, sonst Render-Default.
- * Setz VITE_EXTRACTOR_URL in GitHub Pages ggf. später dazu.
  */
 const API_BASE =
   (import.meta as any).env?.VITE_EXTRACTOR_URL ||
@@ -69,21 +68,14 @@ function parseAmount(maybe: string | null | undefined): number | null {
 
   if (!s) return null;
 
-  // Fall 1: beide vorhanden -> letzter Punkt ist Tausender, letztes Komma Dezimal
+  // Beide Trennzeichen vorhanden
   if (s.includes(",") && s.includes(".")) {
     const lastComma = s.lastIndexOf(",");
     const lastDot = s.lastIndexOf(".");
-    if (lastComma > lastDot) {
-      // "1.234,56" -> 1234.56
-      return Number(s.replace(/\./g, "").replace(",", "."));
-    } else {
-      // "1,234.56" -> 1234.56
-      return Number(s.replace(/,/g, ""));
-    }
+    if (lastComma > lastDot) return Number(s.replace(/\./g, "").replace(",", "."));
+    return Number(s.replace(/,/g, ""));
   }
-  // Fall 2: nur Komma -> Dezimal
   if (s.includes(",")) return Number(s.replace(",", "."));
-  // Fall 3: nur Punkt -> Dezimal
   return Number(s);
 }
 
@@ -99,7 +91,7 @@ function heuristicParse(text: string): Norm {
     gross: null,
   };
 
-  // Datum (YYYY-MM-DD | DD.MM.YYYY | DD/MM/YYYY)
+  // Datum
   const mDate =
     text.match(/\b(\d{4}-\d{2}-\d{2})\b/) ||
     text.match(/\b(\d{2}\.\d{2}\.\d{4})\b/) ||
@@ -116,7 +108,7 @@ function heuristicParse(text: string): Norm {
     }
   }
 
-  // Supplier ganz grob: erste Zeile mit GmbH/AG/UG oder "Rechnung von"
+  // Supplier
   const lines = text.split(/\n+/);
   const supp =
     lines.find((l) => /(GmbH|AG|UG|KG|OHG|Rechnung\s+von)/i.test(l)) ||
@@ -124,16 +116,11 @@ function heuristicParse(text: string): Norm {
     null;
   norm.supplier = supp?.trim() || null;
 
-  // Beträge: suche Zeilen
+  // Beträge
   const findLine = (re: RegExp) => lines.find((l) => re.test(l)) || "";
-
-  const nettoLine = findLine(
-    /(netto|zwischensumme|net amount|subtotal)/i
-  );
+  const nettoLine = findLine(/(netto|zwischensumme|net amount|subtotal)/i);
   const ustLine = findLine(/(USt|MWSt|VAT|tax)/i);
-  const bruttoLine = findLine(
-    /(brutto|gesamt|total|amount due|zu zahlen|payable)/i
-  );
+  const bruttoLine = findLine(/(brutto|gesamt|total|amount due|zu zahlen|payable)/i);
 
   const nettoNum =
     parseAmount((nettoLine.match(/([-+]?[0-9.,]+)\s*€?$/) || [])[1]) ||
@@ -149,7 +136,7 @@ function heuristicParse(text: string): Norm {
   norm.vat = ustNum ?? null;
   norm.gross = bruttoNum ?? null;
 
-  // fehlendes herleiten
+  // Ableiten
   if (norm.net == null && norm.gross != null && norm.vat != null) {
     norm.net = Number((norm.gross - norm.vat).toFixed(2));
   }
@@ -168,30 +155,35 @@ declare global {
   }
 }
 
-/** Erste Seite eines PDFs zu Canvas rendern (pdf.js via CDN) */
+/**
+ * Erste Seite eines PDFs zu Canvas rendern (pdf.js via CDN).
+ * WICHTIG: pdf.js 2.16.105 verwenden – stellt `pdfjsLib` global bereit.
+ */
 async function pdfFirstPageToCanvas(file: File): Promise<HTMLCanvasElement> {
-  // pdf.js laden + worker setzen
-  if (!window.pdfjsLib) {
-    await loadScriptOnce(
-      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.min.js"
-    );
-  }
-  // Worker
-  window.pdfjsLib.GlobalWorkerOptions.workerSrc =
-    "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.worker.min.js";
+  const PDFJS_URL = "https://cdn.jsdelivr.net/npm/pdfjs-dist@2.16.105/build/pdf.min.js";
+  const PDFJS_WORKER_URL = "https://cdn.jsdelivr.net/npm/pdfjs-dist@2.16.105/build/pdf.worker.min.js";
 
-  const url = URL.createObjectURL(file);
-  const doc = await window.pdfjsLib.getDocument({ url }).promise;
+  if (!window.pdfjsLib) {
+    await loadScriptOnce(PDFJS_URL);
+  }
+  if (!window.pdfjsLib) {
+    throw new Error("pdf.js konnte nicht geladen werden (pdfjsLib nicht verfügbar).");
+  }
+  // Worker konfigurieren
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_URL;
+
+  // Direkt aus ArrayBuffer laden → keine CORS-Probleme
+  const data = new Uint8Array(await file.arrayBuffer());
+  const doc = await window.pdfjsLib.getDocument({ data }).promise;
   const page = await doc.getPage(1);
 
-  const viewport = page.getViewport({ scale: 2.0 }); // 2x für bessere OCR-Qualität
+  const viewport = page.getViewport({ scale: 2.0 });
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d")!;
   canvas.width = viewport.width;
   canvas.height = viewport.height;
 
   await page.render({ canvasContext: ctx, viewport }).promise;
-  URL.revokeObjectURL(url);
   return canvas;
 }
 
@@ -203,7 +195,6 @@ async function ocrElementToText(el: HTMLImageElement | HTMLCanvasElement) {
     );
   }
   const { data } = await window.Tesseract.recognize(el, "deu+eng", {
-    // Sprachdaten aus offiziellem tessdata CDN
     langPath: "https://tessdata.projectnaptha.com/4.0.0",
   });
   return String(data?.text || "");
@@ -272,7 +263,6 @@ export default function Belege() {
         setMessage("Kein XML erkannt – starte lokale OCR …");
 
         if (/^image\//i.test(file.type)) {
-          // Bild direkt in <img>
           const img = document.createElement("img");
           img.src = URL.createObjectURL(file);
           await new Promise<void>((res) => (img.onload = () => res()));
@@ -316,7 +306,6 @@ export default function Belege() {
       setMessage(`Fehler beim Verarbeiten: ${e?.message || e}`);
     } finally {
       setBusy(false);
-      // Auswahl zurücksetzen (gleiches File erneut möglich)
       if (inputRef.current) inputRef.current.value = "";
       setFile(null);
     }
