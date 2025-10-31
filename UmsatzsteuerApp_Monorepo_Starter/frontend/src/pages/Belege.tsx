@@ -1,188 +1,426 @@
-import { useEffect, useMemo, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 
-type Normalized = {
-  format?: string;
-  date?: string | number | null;
+/**
+ * API-Basis: zuerst ENV, sonst Render-Default.
+ * Setz VITE_EXTRACTOR_URL in GitHub Pages ggf. später dazu.
+ */
+const API_BASE =
+  (import.meta as any).env?.VITE_EXTRACTOR_URL ||
+  "https://umsatzsteuerapp.onrender.com";
+
+/** Minimaler Datentyp für die Anzeige */
+type Norm = {
+  format: "ubl" | "cii" | "ocr" | string;
+  date: string | number | null;
   supplier?: string | null;
   currency?: string | null;
-  net?: number | null;
-  vat?: number | null;
-  gross?: number | null;
+  net: number | null;
+  vat: number | null;
+  gross: number | null;
 };
 
-type ReceiptRow = {
-  id: string;
-  created_at: string;
-  file_name: string;
+type Row = {
+  ts: number;
+  fileName: string;
   route: string;
-  fields: Normalized;
+  norm: Norm;
 };
 
-export default function Belege() {
-  const [file, setFile] = useState<File | null>(null);
-  const [status, setStatus] = useState<"idle" | "loading" | "ok" | "needs_ocr" | "error">("idle");
-  const [msg, setMsg] = useState<string>("");
-  const [data, setData] = useState<Normalized | null>(null);
-  const [rows, setRows] = useState<ReceiptRow[]>([]);
+// --- Hilfen ------------------------------------------------------------------
 
-  const API_BASE = useMemo(
-    () => (import.meta as any).env?.VITE_EXTRACTOR_URL || "https://umsatzsteuerapp.onrender.com",
-    []
-  );
+/** Datei → Base64 (ohne prefix) */
+async function fileToBase64(file: File): Promise<string> {
+  const buf = await file.arrayBuffer();
+  let binary = "";
+  const bytes = new Uint8Array(buf);
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(
+      null,
+      bytes.subarray(i, i + chunk) as any
+    );
+  }
+  return btoa(binary);
+}
 
-  async function loadRecent() {
-    try {
-      const r = await fetch(`${API_BASE}/receipts/recent?limit=10`);
-      const j = await r.json();
-      setRows(j);
-    } catch {
-      // ignore
+/** Script dynamisch laden (für tesseract/pdf.js) */
+function loadScriptOnce(src: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`script[data-src="${src}"]`)) return resolve();
+    const s = document.createElement("script");
+    s.async = true;
+    s.defer = true;
+    s.dataset.src = src;
+    s.src = src;
+    s.onload = () => resolve();
+    s.onerror = () =>
+      reject(new Error(`Script konnte nicht geladen werden: ${src}`));
+    document.head.appendChild(s);
+  });
+}
+
+/** Dezimal robust parsen ("," oder "." als Dezimaltrennzeichen) */
+function parseAmount(maybe: string | null | undefined): number | null {
+  if (!maybe) return null;
+  const s = maybe
+    .replace(/\s/g, "")
+    .replace(/€/g, "")
+    .replace(/[^0-9,.\-]/g, "");
+
+  if (!s) return null;
+
+  // Fall 1: beide vorhanden -> letzter Punkt ist Tausender, letztes Komma Dezimal
+  if (s.includes(",") && s.includes(".")) {
+    const lastComma = s.lastIndexOf(",");
+    const lastDot = s.lastIndexOf(".");
+    if (lastComma > lastDot) {
+      // "1.234,56" -> 1234.56
+      return Number(s.replace(/\./g, "").replace(",", "."));
+    } else {
+      // "1,234.56" -> 1234.56
+      return Number(s.replace(/,/g, ""));
+    }
+  }
+  // Fall 2: nur Komma -> Dezimal
+  if (s.includes(",")) return Number(s.replace(",", "."));
+  // Fall 3: nur Punkt -> Dezimal
+  return Number(s);
+}
+
+/** Heuristik: OCR-Text → Felder */
+function heuristicParse(text: string): Norm {
+  const norm: Norm = {
+    format: "ocr",
+    date: null,
+    supplier: null,
+    currency: /€|EUR/i.test(text) ? "EUR" : null,
+    net: null,
+    vat: null,
+    gross: null,
+  };
+
+  // Datum (YYYY-MM-DD | DD.MM.YYYY | DD/MM/YYYY)
+  const mDate =
+    text.match(/\b(\d{4}-\d{2}-\d{2})\b/) ||
+    text.match(/\b(\d{2}\.\d{2}\.\d{4})\b/) ||
+    text.match(/\b(\d{2}\/\d{2}\/\d{4})\b/);
+  if (mDate) {
+    const s = mDate[1];
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) norm.date = s;
+    else if (/^\d{2}\.\d{2}\.\d{4}$/.test(s)) {
+      const [d, m, y] = s.split(".");
+      norm.date = `${y}-${m}-${d}`;
+    } else if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) {
+      const [d, m, y] = s.split("/");
+      norm.date = `${y}-${m}-${d}`;
     }
   }
 
-  function toBase64(f: File): Promise<string> {
-    return f.arrayBuffer().then((buf) => {
-      const bytes = new Uint8Array(buf);
-      let bin = "";
-      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-      return btoa(bin);
-    });
+  // Supplier ganz grob: erste Zeile mit GmbH/AG/UG oder "Rechnung von"
+  const lines = text.split(/\n+/);
+  const supp =
+    lines.find((l) => /(GmbH|AG|UG|KG|OHG|Rechnung\s+von)/i.test(l)) ||
+    lines[0] ||
+    null;
+  norm.supplier = supp?.trim() || null;
+
+  // Beträge: suche Zeilen
+  const findLine = (re: RegExp) => lines.find((l) => re.test(l)) || "";
+
+  const nettoLine = findLine(
+    /(netto|zwischensumme|net amount|subtotal)/i
+  );
+  const ustLine = findLine(/(USt|MWSt|VAT|tax)/i);
+  const bruttoLine = findLine(
+    /(brutto|gesamt|total|amount due|zu zahlen|payable)/i
+  );
+
+  const nettoNum =
+    parseAmount((nettoLine.match(/([-+]?[0-9.,]+)\s*€?$/) || [])[1]) ||
+    parseAmount((nettoLine.match(/€\s*([-+]?[0-9.,]+)/) || [])[1]);
+  const ustNum =
+    parseAmount((ustLine.match(/([-+]?[0-9.,]+)\s*€?$/) || [])[1]) ||
+    parseAmount((ustLine.match(/€\s*([-+]?[0-9.,]+)/) || [])[1]);
+  const bruttoNum =
+    parseAmount((bruttoLine.match(/([-+]?[0-9.,]+)\s*€?$/) || [])[1]) ||
+    parseAmount((bruttoLine.match(/€\s*([-+]?[0-9.,]+)/) || [])[1]);
+
+  norm.net = nettoNum ?? null;
+  norm.vat = ustNum ?? null;
+  norm.gross = bruttoNum ?? null;
+
+  // fehlendes herleiten
+  if (norm.net == null && norm.gross != null && norm.vat != null) {
+    norm.net = Number((norm.gross - norm.vat).toFixed(2));
+  }
+  if (norm.gross == null && norm.net != null && norm.vat != null) {
+    norm.gross = Number((norm.net + norm.vat).toFixed(2));
+  }
+  return norm;
+}
+
+// --- OCR mit tesseract -------------------------------------------------------
+
+declare global {
+  interface Window {
+    Tesseract?: any;
+    pdfjsLib?: any;
+  }
+}
+
+/** Erste Seite eines PDFs zu Canvas rendern (pdf.js via CDN) */
+async function pdfFirstPageToCanvas(file: File): Promise<HTMLCanvasElement> {
+  // pdf.js laden + worker setzen
+  if (!window.pdfjsLib) {
+    await loadScriptOnce(
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.min.js"
+    );
+  }
+  // Worker
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+    "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.worker.min.js";
+
+  const url = URL.createObjectURL(file);
+  const doc = await window.pdfjsLib.getDocument({ url }).promise;
+  const page = await doc.getPage(1);
+
+  const viewport = page.getViewport({ scale: 2.0 }); // 2x für bessere OCR-Qualität
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d")!;
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+
+  await page.render({ canvasContext: ctx, viewport }).promise;
+  URL.revokeObjectURL(url);
+  return canvas;
+}
+
+/** Bild/Canvas mit tesseract erkennen (DE+EN) */
+async function ocrElementToText(el: HTMLImageElement | HTMLCanvasElement) {
+  if (!window.Tesseract) {
+    await loadScriptOnce(
+      "https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"
+    );
+  }
+  const { data } = await window.Tesseract.recognize(el, "deu+eng", {
+    // Sprachdaten aus offiziellem tessdata CDN
+    langPath: "https://tessdata.projectnaptha.com/4.0.0",
+  });
+  return String(data?.text || "");
+}
+
+// -----------------------------------------------------------------------------
+
+export default function Belege() {
+  const [file, setFile] = useState<File | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [detail, setDetail] = useState<Norm | null>(null);
+  const [rows, setRows] = useState<Row[]>([]);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  const canUpload = useMemo(() => !!file && !busy, [file, busy]);
+
+  async function sendFeedback(
+    original: Norm,
+    verdict: "accepted" | "corrected",
+    fileName: string,
+    requestId?: string
+  ) {
+    try {
+      await fetch(`${API_BASE}/feedback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          requestId,
+          fileName,
+          verdict,
+          original,
+          corrected: null,
+          timestamp: new Date().toISOString(),
+        }),
+      });
+    } catch {
+      // optional ignorieren
+    }
   }
 
-  async function onUpload() {
+  async function handleUpload() {
     if (!file) return;
-    setStatus("loading");
-    setMsg("");
-    setData(null);
+    setBusy(true);
+    setMessage(null);
+    setDetail(null);
 
     try {
-      const b64 = await toBase64(file);
-      const resp = await fetch(`${API_BASE}/ingest`, {
+      const b64 = await fileToBase64(file);
+      const r = await fetch(`${API_BASE}/ingest`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           fileName: file.name,
-          mime: file.type || guessMime(file.name),
+          mime: file.type || "application/octet-stream",
           dataBase64: b64,
         }),
       });
-      const json = await resp.json();
+      const j = await r.json();
 
-      const route: string = String(json.route || "");
-      const isOk =
-        route.startsWith("xml") ||          // xml-cii | xml-ubl
-        route.startsWith("pdf-zugferd-");   // pdf-zugferd-cii | pdf-zugferd-ubl
-      const needOcr = route === "pdf-no-xml" || route === "needs_ocr";
+      let route: string = j.route;
+      let norm: Norm = j.normalized as Norm;
 
-      if (isOk) {
-        setData(json.normalized as Normalized);
-        setStatus("ok");
-        await loadRecent();
-      } else if (needOcr) {
-        setStatus("needs_ocr");
-        setMsg("Kein eingebettetes XML gefunden – OCR-Fallback kommt als nächstes.");
-      } else {
-        setStatus("error");
-        setMsg("Unerwartete Antwort vom Server.");
+      // OCR-Fallback (lokal) wenn kein XML gefunden wurde
+      if (route === "needs_ocr" || route === "pdf-no-xml") {
+        setMessage("Kein XML erkannt – starte lokale OCR …");
+
+        if (/^image\//i.test(file.type)) {
+          // Bild direkt in <img>
+          const img = document.createElement("img");
+          img.src = URL.createObjectURL(file);
+          await new Promise<void>((res) => (img.onload = () => res()));
+          const text = await ocrElementToText(img);
+          URL.revokeObjectURL(img.src);
+          norm = heuristicParse(text);
+          route = "ocr-local";
+        } else if (file.type === "application/pdf") {
+          const canvas = await pdfFirstPageToCanvas(file);
+          const text = await ocrElementToText(canvas);
+          norm = heuristicParse(text);
+          route = "ocr-local";
+        } else {
+          setMessage("Kein XML erkannt – Dateityp nicht für OCR unterstützt.");
+        }
       }
+
+      // Anzeige + Liste
+      setDetail(norm);
+      setRows((prev) => [
+        {
+          ts: Date.now(),
+          fileName: file.name,
+          route,
+          norm,
+        },
+        ...prev.slice(0, 49),
+      ]);
+
+      // positives Feedback automatisch senden (POC)
+      await sendFeedback(norm, "accepted", file.name, j.requestId);
+
+      setMessage(
+        route === "ocr-local"
+          ? "OCR erfolgreich. Felder heuristisch erkannt."
+          : route.startsWith("pdf-zugferd")
+          ? "ZUGFeRD/Factur-X erkannt."
+          : "XML erkannt – Felder übernommen."
+      );
     } catch (e: any) {
-      setStatus("error");
-      setMsg(e?.message || "Upload fehlgeschlagen");
+      setMessage(`Fehler beim Verarbeiten: ${e?.message || e}`);
+    } finally {
+      setBusy(false);
+      // Auswahl zurücksetzen (gleiches File erneut möglich)
+      if (inputRef.current) inputRef.current.value = "";
+      setFile(null);
     }
   }
 
-  useEffect(() => {
-    loadRecent().catch(() => {});
-  }, []);
-
   return (
-    <div className="p-6 max-w-4xl">
+    <div className="max-w-4xl mx-auto p-6">
       <h1 className="text-2xl font-semibold mb-4">Belege hochladen</h1>
 
-      <div className="flex items-center gap-3 mb-4">
+      <div className="flex gap-3 items-center">
         <input
+          ref={inputRef}
           type="file"
-          accept=".xml,.pdf,.png,.jpg,.jpeg"
-          onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+          accept=".xml,application/xml,application/pdf,image/png,image/jpeg,image/jpg"
+          onChange={(e) => setFile(e.target.files?.[0] || null)}
         />
         <button
-          onClick={onUpload}
-          className="px-4 py-2 rounded bg-blue-600 text-white disabled:opacity-50"
-          disabled={!file || status === "loading"}
+          disabled={!canUpload}
+          onClick={handleUpload}
+          className={`px-4 py-2 rounded text-white ${
+            canUpload ? "bg-blue-600 hover:bg-blue-700" : "bg-gray-400"
+          }`}
         >
-          {status === "loading" ? "Lade hoch…" : "Upload & Interpretieren"}
+          {busy ? "Bitte warten …" : "Upload & Interpretieren"}
         </button>
       </div>
 
-      {status === "ok" && data && (
-        <div className="border rounded p-4 mt-4">
+      {message && (
+        <p className="mt-3 text-sm text-gray-700" role="status">
+          {message}
+        </p>
+      )}
+
+      {detail && (
+        <div className="mt-6 border rounded p-4">
           <h2 className="font-medium mb-3">Erkannte Felder</h2>
-          <dl className="grid grid-cols-3 gap-y-2">
-            <dt className="text-gray-500">Datum</dt><dd className="col-span-2">{String(data.date ?? "—")}</dd>
-            <dt className="text-gray-500">Netto</dt><dd className="col-span-2">{data.net ?? "—"}</dd>
-            <dt className="text-gray-500">USt</dt><dd className="col-span-2">{data.vat ?? "—"}</dd>
-            <dt className="text-gray-500">Brutto</dt><dd className="col-span-2">{data.gross ?? "—"}</dd>
-            <dt className="text-gray-500">Währung</dt><dd className="col-span-2">{data.currency ?? "—"}</dd>
-            <dt className="text-gray-500">Lieferant</dt><dd className="col-span-2">{data.supplier ?? "—"}</dd>
-          </dl>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-y-1">
+            <div className="text-gray-500">Datum</div>
+            <div className="col-span-2">{detail.date ?? "—"}</div>
+
+            <div className="text-gray-500">Netto</div>
+            <div className="col-span-2">
+              {detail.net != null ? detail.net : "—"}
+            </div>
+
+            <div className="text-gray-500">USt</div>
+            <div className="col-span-2">
+              {detail.vat != null ? detail.vat : "—"}
+            </div>
+
+            <div className="text-gray-500">Brutto</div>
+            <div className="col-span-2">
+              {detail.gross != null ? detail.gross : "—"}
+            </div>
+
+            <div className="text-gray-500">Währung</div>
+            <div className="col-span-2">{detail.currency ?? "—"}</div>
+
+            <div className="text-gray-500">Lieferant</div>
+            <div className="col-span-2">{detail.supplier ?? "—"}</div>
+          </div>
         </div>
       )}
 
-      {status === "needs_ocr" && (
-        <div className="border rounded p-4 mt-4">
-          <h2 className="font-medium mb-2">OCR-Fallback</h2>
-          <p className="text-sm text-gray-600">{msg}</p>
-        </div>
-      )}
-
-      {status === "error" && (
-        <div className="border rounded p-4 mt-4">
-          <h2 className="font-medium mb-2">Fehler</h2>
-          <p className="text-sm text-red-600">{msg}</p>
-        </div>
-      )}
-
-      <h2 className="text-xl font-semibold mt-10 mb-3">Letzte Belege</h2>
-      <div className="overflow-x-auto border rounded">
+      <h2 className="mt-8 mb-3 font-medium">Letzte Belege</h2>
+      <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
-            <tr className="bg-gray-50 text-left">
-              <th className="p-2">Datum</th>
-              <th className="p-2">Datei</th>
-              <th className="p-2">Route</th>
-              <th className="p-2">Netto</th>
-              <th className="p-2">USt</th>
-              <th className="p-2">Brutto</th>
+            <tr className="text-left border-b">
+              <th className="py-2">Datum</th>
+              <th>Datei</th>
+              <th>Route</th>
+              <th>Netto</th>
+              <th>USt</th>
+              <th>Brutto</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => {
-              const f = r.fields || {};
-              return (
-                <tr key={r.id} className="border-t">
-                  <td className="p-2">{new Date(r.created_at).toLocaleString()}</td>
-                  <td className="p-2">{r.file_name}</td>
-                  <td className="p-2">{r.route}</td>
-                  <td className="p-2">{f.net ?? "—"}</td>
-                  <td className="p-2">{f.vat ?? "—"}</td>
-                  <td className="p-2">{f.gross ?? "—"}</td>
-                </tr>
-              );
-            })}
+            {rows.map((r, idx) => (
+              <tr key={r.ts + "_" + idx} className="border-b">
+                <td className="py-1">
+                  {new Date(r.ts).toLocaleString("de-DE")}
+                </td>
+                <td>{r.fileName}</td>
+                <td>
+                  <span className="inline-block rounded bg-gray-100 px-2 py-0.5">
+                    {r.route}
+                  </span>
+                </td>
+                <td>{r.norm.net ?? "—"}</td>
+                <td>{r.norm.vat ?? "—"}</td>
+                <td>{r.norm.gross ?? "—"}</td>
+              </tr>
+            ))}
             {rows.length === 0 && (
-              <tr><td className="p-4 text-gray-500" colSpan={6}>Noch keine Einträge.</td></tr>
+              <tr>
+                <td colSpan={6} className="py-4 text-gray-500">
+                  Noch keine Uploads in dieser Session.
+                </td>
+              </tr>
             )}
           </tbody>
         </table>
       </div>
     </div>
   );
-}
-
-function guessMime(name: string) {
-  if (/\.xml$/i.test(name)) return "application/xml";
-  if (/\.pdf$/i.test(name)) return "application/pdf";
-  if (/\.(png)$/i.test(name)) return "image/png";
-  if (/\.(jpe?g)$/i.test(name)) return "image/jpeg";
-  return "application/octet-stream";
 }
