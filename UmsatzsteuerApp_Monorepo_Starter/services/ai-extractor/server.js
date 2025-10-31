@@ -10,29 +10,37 @@ const { Pool } = pg;
 const PORT = process.env.PORT || 8787;
 const DATABASE_URL = process.env.DATABASE_URL || "";
 const ORIGINS = (process.env.CORS_ORIGIN || "https://floho800101.github.io,http://localhost:8080")
-  .split(",").map(s => s.trim()).filter(Boolean);
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Helfer fürs XML
+// XML-Hilfen
 // ──────────────────────────────────────────────────────────────────────────────
+const asArray = (v) => (Array.isArray(v) ? v : v == null ? [] : [v]);
+
 const getText = (v) => {
   if (v == null) return null;
-  if (typeof v === "string") return v;
+  if (typeof v === "string" || typeof v === "number") return String(v);
   return v["#text"] ?? v._text ?? v.value ?? null;
 };
+
 const getNum = (v) => {
   const s = getText(v);
   if (s == null) return null;
+  // Dezimaltrennzeichen robust behandeln
   const n = Number(String(s).replace(",", "."));
   return Number.isFinite(n) ? n : null;
 };
-const getAttr = (node, name) => node?.[`@_${name}`] ?? node?.[`@${name}`] ?? null;
+
+const getAttr = (node, name) =>
+  node?.[`@_${name}`] ?? node?.[`@${name}`] ?? node?.[name] ?? null;
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Normalisierung: UBL
+/** UBL Normalisierung */
 // ──────────────────────────────────────────────────────────────────────────────
 function normalizeFromUblParsed(rootObj) {
-  const inv = rootObj.Invoice || rootObj; // falls bereits direkt das Invoice-Objekt übergeben wurde
+  const inv = rootObj.Invoice || rootObj; // falls direkt Invoice übergeben
   const monetary = inv?.LegalMonetaryTotal || {};
   const payable = monetary?.PayableAmount;
   const lineExt = monetary?.LineExtensionAmount;
@@ -41,16 +49,24 @@ function normalizeFromUblParsed(rootObj) {
   const currency =
     getAttr(payable, "currencyID") ||
     getAttr(lineExt, "currencyID") ||
-    getAttr(taxTotal, "currencyID") || null;
+    getAttr(taxTotal, "currencyID") ||
+    null;
 
-  const gross = payable != null ? getNum(payable) : null;
-  const vat   = taxTotal != null ? getNum(taxTotal) : null;
-  const net   = lineExt  != null ? getNum(lineExt)
-               : (gross != null && vat != null ? Number((gross - vat).toFixed(2)) : null);
+  const gross =
+    payable != null ? getNum(payable) : null;
+  const vat =
+    taxTotal != null ? getNum(taxTotal) : null;
+  let net =
+    lineExt != null
+      ? getNum(lineExt)
+      : gross != null && vat != null
+      ? Number((gross - vat).toFixed(2))
+      : null;
 
   const supplier =
     inv?.AccountingSupplierParty?.Party?.PartyName?.Name ||
-    inv?.AccountingSupplierParty?.Party?.Name || null;
+    inv?.AccountingSupplierParty?.Party?.Name ||
+    null;
 
   const date = inv?.IssueDate || inv?.InvoiceDate || null;
 
@@ -58,39 +74,83 @@ function normalizeFromUblParsed(rootObj) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Normalisierung: CII (XRechnung/UN/CEFACT CrossIndustryInvoice)
+/** CII/XRechnung Normalisierung */
 // ──────────────────────────────────────────────────────────────────────────────
 function normalizeFromCiiParsed(cii) {
-  const date = getText(
-    cii?.ExchangedDocument?.IssueDateTime?.DateTimeString
-  ) || null;
+  // 1) Datum (häufig Formatcode 102 = YYYYMMDD)
+  let date = null;
+  const dateNodeRaw =
+    cii?.ExchangedDocument?.IssueDateTime?.DateTimeString ??
+    cii?.ExchangedDocument?.IssueDateTime; // manche Mapper legen #text direkt unter IssueDateTime
+  const dateNode = Array.isArray(dateNodeRaw) ? dateNodeRaw[0] : dateNodeRaw;
 
+  const dateTxt = getText(dateNode);
+  const fmt = getAttr(dateNode, "format") || getAttr(dateNode, "Format");
+  if (dateTxt) {
+    const s = String(dateTxt);
+    if ((fmt === "102" || !fmt) && /^\d{8}$/.test(s)) {
+      date = `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+    } else {
+      // unbekanntes Format – roh zurückgeben
+      date = s;
+    }
+  }
+
+  // 2) Lieferant
   const supplier =
-    cii?.SupplyChainTradeTransaction?.ApplicableHeaderTradeAgreement
-       ?.SellerTradeParty?.Name ?? null;
+    cii?.SupplyChainTradeTransaction?.ApplicableHeaderTradeAgreement?.SellerTradeParty?.Name ??
+    null;
+
+  // 3) Summen: je nach Profil unterschiedliche Knotenbezeichner
+  const settlement =
+    cii?.SupplyChainTradeTransaction?.ApplicableHeaderTradeSettlement ?? {};
 
   const sums =
-    cii?.SupplyChainTradeTransaction?.ApplicableHeaderTradeSettlement
-       ?.SpecifiedTradeSettlementHeaderMonetarySummation ?? {};
+    settlement.SpecifiedTradeSettlementHeaderMonetarySummation ??
+    settlement.SpecifiedTradeSettlementMonetarySummation ??
+    {};
 
-  const netNode   = sums?.TaxBasisTotalAmount ?? sums?.LineTotalAmount ?? null;
-  const vatNode   = sums?.TaxTotalAmount ?? null;
-  const grossNode = sums?.GrandTotalAmount ?? sums?.TaxInclusiveAmount ?? null;
+  // Kandidaten für Beträge (Arrays möglich)
+  const vatNodes = asArray(
+    sums.TaxTotalAmount ??
+      // manche Profile listen mehrere Steuerbeträge
+      settlement.TaxTotalAmount
+  );
 
+  const netNode =
+    sums.TaxBasisTotalAmount ??
+    sums.LineTotalAmount ??
+    settlement.TaxBasisTotalAmount ??
+    null;
+
+  const grossNode =
+    sums.GrandTotalAmount ??
+    sums.TaxInclusiveAmount ??
+    settlement.GrandTotalAmount ??
+    settlement.DuePayableAmount ??
+    null;
+
+  // Zahlen extrahieren
+  const vat = vatNodes.length ? getNum(vatNodes[0]) : null;
+  let net = getNum(netNode);
+  let gross = getNum(grossNode);
+
+  // Währung aus einem der Knoten ziehen
   const currency =
     getAttr(netNode, "currencyID") ||
     getAttr(grossNode, "currencyID") ||
-    getAttr(vatNode, "currencyID") || null;
+    (vatNodes[0] ? getAttr(vatNodes[0], "currencyID") : null) ||
+    null;
 
-  return {
-    format: "cii",
-    date,
-    supplier: supplier ?? null,
-    currency: currency ?? null,
-    net:   getNum(netNode),
-    vat:   getNum(vatNode),
-    gross: getNum(grossNode),
-  };
+  // fehlende Werte herleiten
+  if (net == null && gross != null && vat != null) {
+    net = Number((gross - vat).toFixed(2));
+  }
+  if (gross == null && net != null && vat != null) {
+    gross = Number((net + vat).toFixed(2));
+  }
+
+  return { format: "cii", date, supplier, currency, net, vat, gross };
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -98,15 +158,18 @@ function normalizeFromCiiParsed(cii) {
 // ──────────────────────────────────────────────────────────────────────────────
 let pool = null;
 let lastDbPingOk = false;
+
 async function initDb() {
   if (!DATABASE_URL) {
     console.warn("[ai-extractor] No DATABASE_URL set → running WITHOUT persistence.");
     return;
   }
-  const needsSSL = /neon\.tech|supabase\.co|amazonaws\.com|azure\.com|gcp|renderusercontent\.com/i.test(DATABASE_URL);
+  const needsSSL = /neon\.tech|supabase\.co|amazonaws\.com|azure\.com|gcp|renderusercontent\.com/i.test(
+    DATABASE_URL
+  );
   pool = new Pool({
     connectionString: DATABASE_URL,
-    ssl: needsSSL ? { rejectUnauthorized: false } : undefined
+    ssl: needsSSL ? { rejectUnauthorized: false } : undefined,
   });
 
   await pool.query(`
@@ -135,8 +198,12 @@ async function initDb() {
     );
   `);
 
-  try { await pool.query("select now()"); lastDbPingOk = true; }
-  catch { lastDbPingOk = false; }
+  try {
+    await pool.query("select now()");
+    lastDbPingOk = true;
+  } catch {
+    lastDbPingOk = false;
+  }
 }
 await initDb();
 
@@ -145,20 +212,26 @@ await initDb();
 // ──────────────────────────────────────────────────────────────────────────────
 const app = express();
 app.use(morgan("dev"));
-app.use(express.json({ limit: "15mb" }));
-app.use(cors({
-  origin: (origin, cb) => {
-    if (!origin) return cb(null, true);
-    if (ORIGINS.includes(origin)) return cb(null, true);
-    cb(new Error(`CORS blocked: ${origin}`));
-  }
-}));
+app.use(express.json({ limit: "25mb" }));
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true);
+      if (ORIGINS.includes(origin)) return cb(null, true);
+      cb(new Error(`CORS blocked: ${origin}`));
+    },
+  })
+);
 
 app.get("/healthz", async (_req, res) => {
   let db = !!pool;
   if (pool) {
-    try { await pool.query("select 1"); lastDbPingOk = true; }
-    catch { lastDbPingOk = false; }
+    try {
+      await pool.query("select 1");
+      lastDbPingOk = true;
+    } catch {
+      lastDbPingOk = false;
+    }
   }
   res.json({ ok: true, db, dbPing: lastDbPingOk });
 });
@@ -169,11 +242,13 @@ app.get("/_debug/receipts/count", async (_req, res) => {
   res.json({ count: r.rows[0].c, db: true });
 });
 
-// Universal-XML → Erkenne CII oder UBL, sonst OCR-Fallback
+// Universal-XML → CII oder UBL erkennen, sonst OCR-Fallback
 app.post("/ingest", async (req, res) => {
   const { fileName, mime, dataBase64, tenantId, userId } = req.body || {};
   if (!fileName || !mime || !dataBase64) {
-    return res.status(400).json({ error: "fileName, mime, dataBase64 required" });
+    return res
+      .status(400)
+      .json({ error: "fileName, mime, dataBase64 required" });
   }
 
   const requestId = nanoid();
@@ -187,7 +262,7 @@ app.post("/ingest", async (req, res) => {
     rawText = Buffer.from(dataBase64, "base64").toString("utf8");
 
     if (looksXml) {
-      // Einmalig universell parsen: Prefixe entfernen, Attribute als @_
+      // einmal „universell“ parsen – NS-Präfixe entfernen, Attribute als @_*
       const universal = new XMLParser({
         ignoreAttributes: false,
         attributeNamePrefix: "@_",
@@ -202,12 +277,12 @@ app.post("/ingest", async (req, res) => {
         normalized = normalizeFromUblParsed(universal);
         route = "xml-ubl";
       } else {
-        // Letzter Versuch: klassisch UBL parsen (falls removeNSPrefix inhaltlich stört)
+        // zweiter Versuch: klassisch (manche UBLs mögen anderes Prefix)
         const ublObj = new XMLParser({
           ignoreAttributes: false,
           attributeNamePrefix: "@",
           removeNSPrefix: true,
-          allowBooleanAttributes: true
+          allowBooleanAttributes: true,
         }).parse(rawText);
         if (ublObj?.Invoice) {
           normalized = normalizeFromUblParsed(ublObj);
@@ -228,7 +303,17 @@ app.post("/ingest", async (req, res) => {
     await pool.query(
       `insert into receipts (id, tenant_id, user_id, file_name, mime, raw_text, fields, route, last_request_id)
        values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-      [nanoid(), tenantId || null, userId || null, fileName, mime, rawText, normalized, route, requestId]
+      [
+        nanoid(),
+        tenantId || null,
+        userId || null,
+        fileName,
+        mime,
+        rawText,
+        normalized,
+        route,
+        requestId,
+      ]
     );
   }
 
@@ -236,26 +321,38 @@ app.post("/ingest", async (req, res) => {
     requestId,
     route,
     normalized,
-    hint: route === "needs_ocr" ? "No XML structure detected – OCR path" : undefined
+    hint:
+      route === "needs_ocr"
+        ? "No XML structure detected – OCR path"
+        : undefined,
   });
 });
 
 app.post("/feedback", async (req, res) => {
   const p = req.body || {};
   const required = ["fileName", "verdict", "original", "timestamp"];
-  for (const k of required) if (!(k in p)) return res.status(400).json({ error: `missing ${k}` });
-  if (!["accepted","corrected"].includes(p.verdict)) return res.status(400).json({ error: "invalid verdict" });
+  for (const k of required)
+    if (!(k in p)) return res.status(400).json({ error: `missing ${k}` });
+  if (!["accepted", "corrected"].includes(p.verdict))
+    return res.status(400).json({ error: "invalid verdict" });
 
   if (pool) {
     await pool.query(
       `insert into feedback_events (id, request_id, file_name, verdict, original, corrected)
        values ($1,$2,$3,$4,$5,$6)`,
-      [nanoid(), p.requestId || null, p.fileName, p.verdict, p.original, p.corrected || null]
+      [
+        nanoid(),
+        p.requestId || null,
+        p.fileName,
+        p.verdict,
+        p.original,
+        p.corrected || null,
+      ]
     );
   }
   res.json({ ok: true, persisted: !!pool });
 });
 
 app.listen(PORT, () => {
-  console.log(`ai-extractor listening on :${PORT} (db=${!!pool ? "on" : "off"})`);
+  console.log(`ai-extractor listening on :${PORT} (db=${pool ? "on" : "off"})`);
 });
