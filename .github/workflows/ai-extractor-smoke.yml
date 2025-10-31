@@ -92,7 +92,7 @@ jobs:
             -H "Content-Type: application/json" \
             -d "{\"fileName\":\"sample.xml\",\"mime\":\"application/xml\",\"dataBase64\":\"$B64\"}" \
             | tee out.json
-          grep -q '"route":"xml"' out.json
+          grep -Eq '"route":"xml(-ubl|-cii)?"}|\"route\":\"xml(-ubl|-cii)?\"' out.json
 
       - name: POST /feedback
         working-directory: UmsatzsteuerApp_Monorepo_Starter/services/ai-extractor
