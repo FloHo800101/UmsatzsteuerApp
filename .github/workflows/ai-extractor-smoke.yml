@@ -1,0 +1,112 @@
+name: AI Extractor Smoke Test
+
+on:
+  workflow_dispatch: {}
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'UmsatzsteuerApp_Monorepo_Starter/services/ai-extractor/**'
+  push:
+    branches: [ main ]
+    paths:
+      - 'UmsatzsteuerApp_Monorepo_Starter/services/ai-extractor/**'
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: uapp
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install deps
+        working-directory: UmsatzsteuerApp_Monorepo_Starter/services/ai-extractor
+        run: npm ci || npm i
+
+      - name: Start server
+        working-directory: UmsatzsteuerApp_Monorepo_Starter/services/ai-extractor
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/uapp
+          CORS_ORIGIN: https://floho800101.github.io,http://localhost:8080
+          PORT: 8787
+        run: |
+          nohup node server.js > server.log 2>&1 &
+          echo $! > server.pid
+
+      - name: Wait for /healthz
+        run: |
+          for i in {1..30}; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8787/healthz || true)
+            if [ "$code" = "200" ]; then echo "Server up"; exit 0; fi
+            sleep 1
+          done
+          echo "::error::Service did not come up"; exit 1
+
+      - name: Prepare sample XML
+        working-directory: UmsatzsteuerApp_Monorepo_Starter/services/ai-extractor
+        run: |
+          cat > sample.xml <<'XML'
+          <Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"
+                   xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2"
+                   xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2">
+            <cbc:IssueDate>2025-01-31</cbc:IssueDate>
+            <cac:LegalMonetaryTotal>
+              <cbc:LineExtensionAmount currencyID="EUR">100.00</cbc:LineExtensionAmount>
+              <cbc:PayableAmount currencyID="EUR">119.00</cbc:PayableAmount>
+            </cac:LegalMonetaryTotal>
+            <cac:TaxTotal>
+              <cbc:TaxAmount currencyID="EUR">19.00</cbc:TaxAmount>
+            </cac:TaxTotal>
+            <cac:AccountingSupplierParty>
+              <cac:Party><cac:PartyName><cbc:Name>Beispiel GmbH</cbc:Name></cac:PartyName></cac:Party>
+            </cac:AccountingSupplierParty>
+          </Invoice>
+          XML
+          base64 -w 0 sample.xml > sample.b64
+
+      - name: POST /ingest (XML Path)
+        working-directory: UmsatzsteuerApp_Monorepo_Starter/services/ai-extractor
+        run: |
+          B64=$(cat sample.b64)
+          curl -s -X POST http://localhost:8787/ingest \
+            -H "Content-Type: application/json" \
+            -d "{\"fileName\":\"sample.xml\",\"mime\":\"application/xml\",\"dataBase64\":\"$B64\"}" \
+            | tee out.json
+          grep -q '"route":"xml"' out.json
+
+      - name: POST /feedback
+        working-directory: UmsatzsteuerApp_Monorepo_Starter/services/ai-extractor
+        run: |
+          REQ=$(node -e "console.log(JSON.parse(require('fs').readFileSync('out.json','utf8')).requestId)")
+          curl -s -X POST http://localhost:8787/feedback \
+            -H "Content-Type: application/json" \
+            -d "{\"fileName\":\"sample.xml\",\"verdict\":\"accepted\",\"original\":{\"rawText\":\"TEST\"},\"timestamp\":\"2025-10-31T16:00:00.000Z\",\"requestId\":\"$REQ\"}" \
+            | tee fb.json
+          grep -q '"ok":true' fb.json
+
+      - name: Show server log on failure
+        if: failure()
+        working-directory: UmsatzsteuerApp_Monorepo_Starter/services/ai-extractor
+        run: |
+          echo "------ server.log ------"
+          cat server.log || true
