@@ -1,4 +1,3 @@
-// services/ai-extractor/server.js
 import express from "express";
 import cors from "cors";
 import morgan from "morgan";
@@ -14,72 +13,89 @@ const ORIGINS = (process.env.CORS_ORIGIN || "https://floho800101.github.io,http:
   .split(",").map(s => s.trim()).filter(Boolean);
 
 // ──────────────────────────────────────────────────────────────────────────────
-// CII (UN/CEFACT Cross-Industry Invoice) – Erkennung & Parser (inline)
+// Helfer fürs XML
 // ──────────────────────────────────────────────────────────────────────────────
-const ciiText = (v) => (typeof v === "string" ? v : v?.["#text"] ?? v?._text ?? null);
-const ciiNum  = (v) => {
-  const s = ciiText(v);
+const getText = (v) => {
+  if (v == null) return null;
+  if (typeof v === "string") return v;
+  return v["#text"] ?? v._text ?? v.value ?? null;
+};
+const getNum = (v) => {
+  const s = getText(v);
   if (s == null) return null;
   const n = Number(String(s).replace(",", "."));
   return Number.isFinite(n) ? n : null;
 };
-const ciiAttr = (node, name) => node?.[`@_${name}`] ?? null;
+const getAttr = (node, name) => node?.[`@_${name}`] ?? node?.[`@${name}`] ?? null;
 
-/** Sehr robuste Heuristik: erkennt <rsm:CrossIndustryInvoice> bzw. ohne Präfix */
-function isCII(xmlString) {
-  return /<\s*([a-zA-Z0-9]+:)?CrossIndustryInvoice\b/.test(xmlString);
+// ──────────────────────────────────────────────────────────────────────────────
+// Normalisierung: UBL
+// ──────────────────────────────────────────────────────────────────────────────
+function normalizeFromUblParsed(rootObj) {
+  const inv = rootObj.Invoice || rootObj; // falls bereits direkt das Invoice-Objekt übergeben wurde
+  const monetary = inv?.LegalMonetaryTotal || {};
+  const payable = monetary?.PayableAmount;
+  const lineExt = monetary?.LineExtensionAmount;
+  const taxTotal = inv?.TaxTotal?.TaxAmount;
+
+  const currency =
+    getAttr(payable, "currencyID") ||
+    getAttr(lineExt, "currencyID") ||
+    getAttr(taxTotal, "currencyID") || null;
+
+  const gross = payable != null ? getNum(payable) : null;
+  const vat   = taxTotal != null ? getNum(taxTotal) : null;
+  const net   = lineExt  != null ? getNum(lineExt)
+               : (gross != null && vat != null ? Number((gross - vat).toFixed(2)) : null);
+
+  const supplier =
+    inv?.AccountingSupplierParty?.Party?.PartyName?.Name ||
+    inv?.AccountingSupplierParty?.Party?.Name || null;
+
+  const date = inv?.IssueDate || inv?.InvoiceDate || null;
+
+  return { format: "ubl", date, currency, net, vat, gross, supplier };
 }
 
-/** Parsed CII (removeNSPrefix=true, attributeNamePrefix='@_') → Normalisierung */
-function parseCII(xmlString) {
-  const parserCII = new XMLParser({
-    ignoreAttributes: false,
-    attributeNamePrefix: "@_",
-    removeNSPrefix: true,
-    allowBooleanAttributes: true,
-  });
-  const j = parserCII.parse(xmlString);
-  const r = j?.CrossIndustryInvoice;
-  if (!r) throw new Error("CII root element not found");
-
-  const date = ciiText(
-    r?.ExchangedDocument?.IssueDateTime?.DateTimeString
+// ──────────────────────────────────────────────────────────────────────────────
+// Normalisierung: CII (XRechnung/UN/CEFACT CrossIndustryInvoice)
+// ──────────────────────────────────────────────────────────────────────────────
+function normalizeFromCiiParsed(cii) {
+  const date = getText(
+    cii?.ExchangedDocument?.IssueDateTime?.DateTimeString
   ) || null;
 
   const supplier =
-    r?.SupplyChainTradeTransaction?.ApplicableHeaderTradeAgreement
-      ?.SellerTradeParty?.Name ?? null;
+    cii?.SupplyChainTradeTransaction?.ApplicableHeaderTradeAgreement
+       ?.SellerTradeParty?.Name ?? null;
 
   const sums =
-    r?.SupplyChainTradeTransaction?.ApplicableHeaderTradeSettlement
-      ?.SpecifiedTradeSettlementHeaderMonetarySummation ?? {};
+    cii?.SupplyChainTradeTransaction?.ApplicableHeaderTradeSettlement
+       ?.SpecifiedTradeSettlementHeaderMonetarySummation ?? {};
 
-  const netNode =
-    sums?.TaxBasisTotalAmount ??
-    sums?.LineTotalAmount ?? null;
-  const vatNode = sums?.TaxTotalAmount ?? null;
-  const grossNode =
-    sums?.GrandTotalAmount ??
-    sums?.TaxInclusiveAmount ?? null;
+  const netNode   = sums?.TaxBasisTotalAmount ?? sums?.LineTotalAmount ?? null;
+  const vatNode   = sums?.TaxTotalAmount ?? null;
+  const grossNode = sums?.GrandTotalAmount ?? sums?.TaxInclusiveAmount ?? null;
 
   const currency =
-    ciiAttr(netNode, "currencyID") ||
-    ciiAttr(grossNode, "currencyID") ||
-    ciiAttr(vatNode, "currencyID") ||
-    null;
+    getAttr(netNode, "currencyID") ||
+    getAttr(grossNode, "currencyID") ||
+    getAttr(vatNode, "currencyID") || null;
 
   return {
     format: "cii",
     date,
     supplier: supplier ?? null,
     currency: currency ?? null,
-    net: ciiNum(netNode),
-    vat: ciiNum(vatNode),
-    gross: ciiNum(grossNode),
+    net:   getNum(netNode),
+    vat:   getNum(vatNode),
+    gross: getNum(grossNode),
   };
 }
 
-// ── DB (optional, aber bevorzugt) ─────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────────────
+// DB (optional)
+// ──────────────────────────────────────────────────────────────────────────────
 let pool = null;
 let lastDbPingOk = false;
 async function initDb() {
@@ -119,51 +135,14 @@ async function initDb() {
     );
   `);
 
-  try {
-    await pool.query("select now()");
-    lastDbPingOk = true;
-  } catch {
-    lastDbPingOk = false;
-  }
+  try { await pool.query("select now()"); lastDbPingOk = true; }
+  catch { lastDbPingOk = false; }
 }
 await initDb();
 
-// ── UBL-Parser & Normalizer ──────────────────────────────────────────────────
-const ublParser = new XMLParser({
-  ignoreAttributes: false,
-  attributeNamePrefix: "@",
-  removeNSPrefix: true,
-  allowBooleanAttributes: true
-});
-
-function normalizeFromUbl(u) {
-  const inv = u.Invoice || u;
-  const monetary = inv?.LegalMonetaryTotal || {};
-  const payable = monetary?.PayableAmount;
-  const lineExt = monetary?.LineExtensionAmount;
-  const taxTotal = inv?.TaxTotal?.TaxAmount;
-
-  const toNum = v => (typeof v === "object" ? (v["#text"] || v["@value"]) : v);
-  const currency =
-    (typeof payable === "object" && payable?.["@currencyID"]) ||
-    (typeof lineExt === "object" && lineExt?.["@currencyID"]) ||
-    (typeof taxTotal === "object" && taxTotal?.["@currencyID"]) || null;
-
-  const gross = payable != null ? Number(toNum(payable)) : null;
-  const vat   = taxTotal != null ? Number(toNum(taxTotal)) : null;
-  const net   = lineExt != null ? Number(toNum(lineExt)) :
-               (gross != null && vat != null ? Number((gross - vat).toFixed(2)) : null);
-
-  const supplier =
-    inv?.AccountingSupplierParty?.Party?.PartyName?.Name ||
-    inv?.AccountingSupplierParty?.Party?.Name || null;
-
-  const date = inv?.IssueDate || inv?.InvoiceDate || null;
-
-  return { format: "ubl", date, currency, net, vat, gross, supplier };
-}
-
-// ── APP ──────────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────────────
+// App
+// ──────────────────────────────────────────────────────────────────────────────
 const app = express();
 app.use(morgan("dev"));
 app.use(express.json({ limit: "15mb" }));
@@ -175,7 +154,6 @@ app.use(cors({
   }
 }));
 
-// Health zeigt jetzt auch DB-Status + Live-Ping
 app.get("/healthz", async (_req, res) => {
   let db = !!pool;
   if (pool) {
@@ -185,14 +163,13 @@ app.get("/healthz", async (_req, res) => {
   res.json({ ok: true, db, dbPing: lastDbPingOk });
 });
 
-// Kleines Debug-Endpoint: Anzahl Belege
 app.get("/_debug/receipts/count", async (_req, res) => {
   if (!pool) return res.json({ count: 0, db: false });
   const r = await pool.query("select count(*)::int as c from receipts");
   res.json({ count: r.rows[0].c, db: true });
 });
 
-// Ingest: XML (UBL/CII) → normalisieren; sonst OCR-Fallback
+// Universal-XML → Erkenne CII oder UBL, sonst OCR-Fallback
 app.post("/ingest", async (req, res) => {
   const { fileName, mime, dataBase64, tenantId, userId } = req.body || {};
   if (!fileName || !mime || !dataBase64) {
@@ -205,24 +182,46 @@ app.post("/ingest", async (req, res) => {
   let normalized = {};
 
   const looksXml = /xml/i.test(mime) || /\.xml$/i.test(fileName);
-  if (looksXml) {
-    try {
-      rawText = Buffer.from(dataBase64, "base64").toString("utf8");
 
-      // 1) CII zuerst testen (erkennt CrossIndustryInvoice)
-      if (isCII(rawText)) {
-        normalized = parseCII(rawText);
+  try {
+    rawText = Buffer.from(dataBase64, "base64").toString("utf8");
+
+    if (looksXml) {
+      // Einmalig universell parsen: Prefixe entfernen, Attribute als @_
+      const universal = new XMLParser({
+        ignoreAttributes: false,
+        attributeNamePrefix: "@_",
+        removeNSPrefix: true,
+        allowBooleanAttributes: true,
+      }).parse(rawText);
+
+      if (universal?.CrossIndustryInvoice) {
+        normalized = normalizeFromCiiParsed(universal.CrossIndustryInvoice);
         route = "xml-cii";
-      } else {
-        // 2) UBL versuchen
-        const ublObj = ublParser.parse(rawText);
-        normalized = normalizeFromUbl(ublObj);
+      } else if (universal?.Invoice) {
+        normalized = normalizeFromUblParsed(universal);
         route = "xml-ubl";
+      } else {
+        // Letzter Versuch: klassisch UBL parsen (falls removeNSPrefix inhaltlich stört)
+        const ublObj = new XMLParser({
+          ignoreAttributes: false,
+          attributeNamePrefix: "@",
+          removeNSPrefix: true,
+          allowBooleanAttributes: true
+        }).parse(rawText);
+        if (ublObj?.Invoice) {
+          normalized = normalizeFromUblParsed(ublObj);
+          route = "xml-ubl";
+        } else {
+          route = "needs_ocr";
+        }
       }
-    } catch (e) {
-      console.warn("[ingest] XML parse failed, falling back to OCR:", e?.message);
+    } else {
       route = "needs_ocr";
     }
+  } catch (e) {
+    console.warn("[ingest] XML parse failed → OCR fallback:", e?.message);
+    route = "needs_ocr";
   }
 
   if (pool) {
@@ -237,11 +236,10 @@ app.post("/ingest", async (req, res) => {
     requestId,
     route,
     normalized,
-    hint: route === "needs_ocr" ? "No XML detected – use OCR path" : undefined
+    hint: route === "needs_ocr" ? "No XML structure detected – OCR path" : undefined
   });
 });
 
-// Feedback
 app.post("/feedback", async (req, res) => {
   const p = req.body || {};
   const required = ["fileName", "verdict", "original", "timestamp"];
