@@ -1,4 +1,3 @@
-// src/mapping.js  (ESM; stellt sicher, dass "mapFromModel" als NAMED export existiert)
 export function mapFromModel(model, raw, fallbackConf = 0) {
   try {
     const ar = raw?.analyzeResult;
@@ -16,7 +15,6 @@ export function mapFromModel(model, raw, fallbackConf = 0) {
           tax: pickNum(vf.Tax),
         };
       });
-
       return {
         type: "invoice",
         vendorName: pickText(f.VendorName),
@@ -46,7 +44,6 @@ export function mapFromModel(model, raw, fallbackConf = 0) {
           totalPrice: pickNum(vf.TotalPrice),
         };
       });
-
       return {
         type: "receipt",
         merchantName: pickText(f.MerchantName),
@@ -84,26 +81,19 @@ export function mapFromModel(model, raw, fallbackConf = 0) {
       };
     }
   } catch {
-    // fällt in den Fallback
+    // Fallback unten
   }
-  return {
-    type: model,
-    contentPreview: null,
-    source: "unknown",
-    confidence: fallbackConf,
-  };
+  return { type: model, contentPreview: null, source: "unknown", confidence: fallbackConf };
 }
 
-// ---- helpers ----
+// Helpers
 function extractArray(node) {
   if (!node) return [];
   if (Array.isArray(node.values)) return node.values;
   if (Array.isArray(node?.valueArray)) return node.valueArray;
   return [];
 }
-function fieldProps(v) {
-  return v?.properties || v?.fields || {};
-}
+function fieldProps(v) { return v?.properties || v?.fields || {}; }
 function pickText(f) {
   if (!f) return null;
   if (typeof f.content === "string") return f.content;
@@ -116,8 +106,7 @@ function pickText(f) {
 function pickNum(f) {
   if (!f) return null;
   if (typeof f.valueNumber === "number") return f.valueNumber;
-  if (f?.valueCurrency && typeof f.valueCurrency.amount === "number")
-    return f.valueCurrency.amount;
+  if (f?.valueCurrency && typeof f.valueCurrency.amount === "number") return f.valueCurrency.amount;
   if (typeof f.value === "number") return f.value;
   return null;
 }
