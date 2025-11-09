@@ -1,17 +1,14 @@
 import express from "express";
 import cors from "cors";
 import multer from "multer";
+import * as mapping from "./src/mapping.js";
 import { analyze } from "./src/azure.js";
-import { mapFromModel } from "./src/mapping.js";
 
-// Diagnostik für unbehandelte Fehler:
-process.on("unhandledRejection", (r) => {
-  console.error("[unhandledRejection]", r);
-});
-process.on("uncaughtException", (e) => {
-  console.error("[uncaughtException]", e);
-  // nicht sofort exit – Render restarts; wir wollen Logs sehen
-});
+// toleranter Zugriff: named export ODER default
+const mapFromModel = mapping.mapFromModel ?? mapping.default;
+
+process.on("unhandledRejection", (r) => console.error("[unhandledRejection]", r));
+process.on("uncaughtException", (e) => console.error("[uncaughtException]", e));
 
 console.log("[server] booting…");
 
@@ -20,7 +17,6 @@ app.use(cors({ origin: "*", methods: ["GET", "POST", "OPTIONS"] }));
 
 app.get("/health", (_, res) => res.json({ ok: true }));
 
-// Upload (im Speicher)
 const maxMB = parseInt(process.env.MAX_FILE_MB || "25", 10);
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -69,10 +65,9 @@ app.post("/extract", upload.single("file"), async (req, res) => {
           raw: includeRaw ? raw : undefined,
         });
       }
-      // sonst: nächstes Modell probieren
+      // sonst: nächstes Modell
     }
 
-    // Nichts über Schwelle → letztes Ergebnis zurückgeben
     return res.json({
       ...lastResult,
       raw: includeRaw ? lastResult?.raw : undefined,
