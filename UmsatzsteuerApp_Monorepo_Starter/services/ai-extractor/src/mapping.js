@@ -1,112 +1,94 @@
-export function mapFromModel(model, raw, fallbackConf = 0) {
-  try {
-    const ar = raw?.analyzeResult;
+// mapping.js – Azure DI → App-Format (robust inkl. Fallbacks)
 
-    if (model === "invoice") {
-      const doc = ar?.documents?.[0];
-      const f = doc?.fields || {};
-      const items = extractArray(f.Items).map((v) => {
-        const vf = fieldProps(v);
-        return {
-          description: pickText(vf.Description),
-          quantity: pickNum(vf.Quantity),
-          unitPrice: pickNum(vf.UnitPrice),
-          amount: pickNum(vf.Amount),
-          tax: pickNum(vf.Tax),
-        };
-      });
-      return {
-        type: "invoice",
-        vendorName: pickText(f.VendorName),
-        vendorVatId: pickText(f.VendorVatId) || pickText(f.VendorTaxId),
-        invoiceNumber: pickText(f.InvoiceId) || pickText(f.InvoiceNumber),
-        invoiceDate: pickText(f.InvoiceDate),
-        dueDate: pickText(f.DueDate),
-        currency: pickText(f.Currency),
-        subtotal: pickNum(f.Subtotal),
-        tax: pickNum(f.TotalTax),
-        total: pickNum(f.TotalAmount) ?? pickNum(f.AmountDue),
-        items,
-        confidence: typeof doc?.confidence === "number" ? doc.confidence : fallbackConf,
-        source: "prebuilt-invoice",
-      };
-    }
+function round2(n) { return (typeof n === "number") ? Math.round(n * 100) / 100 : n; }
 
-    if (model === "receipt") {
-      const doc = ar?.documents?.[0];
-      const f = doc?.fields || {};
-      const items = extractArray(f.Items).map((v) => {
-        const vf = fieldProps(v);
-        return {
-          description: pickText(vf.Description),
-          quantity: pickNum(vf.Quantity),
-          unitPrice: pickNum(vf.UnitPrice),
-          totalPrice: pickNum(vf.TotalPrice),
-        };
-      });
-      return {
-        type: "receipt",
-        merchantName: pickText(f.MerchantName),
-        transactionDate: pickText(f.TransactionDate),
-        transactionTime: pickText(f.TransactionTime),
-        currency: pickText(f.Currency),
-        subtotal: pickNum(f.Subtotal),
-        tax: pickNum(f.TotalTax),
-        tip: pickNum(f.Tip),
-        total: pickNum(f.Total),
-        items,
-        confidence: typeof doc?.confidence === "number" ? doc.confidence : fallbackConf,
-        source: "prebuilt-receipt",
-      };
-    }
+function pickStr(f) {
+  if (!f) return null;
+  return typeof f.valueString === "string" ? f.valueString : (f.content ?? null);
+}
+function pickDate(f) {
+  if (!f) return null;
+  if (f.valueDate) return f.valueDate; // ISO (yyyy-mm-dd)
+  return pickStr(f);
+}
+function pickCurrency(f) {
+  if (!f) return { amount: null, code: null, symbol: null };
+  const vc = f.valueCurrency || {};
+  if (typeof vc.amount === "number")
+    return { amount: vc.amount, code: vc.currencyCode || null, symbol: vc.currencySymbol || null };
+  if (typeof f.valueNumber === "number")
+    return { amount: f.valueNumber, code: null, symbol: null };
+  return { amount: null, code: null, symbol: null };
+}
 
-    if (model === "layout") {
-      return {
-        type: "layout",
-        pages: ar?.pages?.length || 0,
-        tables: ar?.tables?.length || 0,
-        paragraphs: ar?.paragraphs?.length || 0,
-        contentPreview: ar?.content ? String(ar.content).slice(0, 400) : null,
-        source: "prebuilt-layout",
-        confidence: fallbackConf,
-      };
-    }
+export function mapFromAzure(raw, modelId, confidence) {
+  const doc = raw?.analyzeResult?.documents?.[0] || {};
+  const fields = doc.fields || {};
+  const get = (name) => fields[name];
 
-    if (model === "read") {
+  // Stammdaten
+  const vendorName   = pickStr(get("VendorName"));
+  const vendorVatId  = pickStr(get("VendorTaxId")) || pickStr(get("VendorVatId")) || pickStr(get("VendorRegistrationId"));
+  const invoiceNo    = pickStr(get("InvoiceId")) || pickStr(get("InvoiceNumber"));
+  const invoiceDate  = pickDate(get("InvoiceDate"));
+  const dueDate      = pickDate(get("DueDate"));
+
+  // Beträge
+  const invTot = pickCurrency(get("InvoiceTotal"));
+  const subTot = pickCurrency(get("SubTotal"));
+  const totTax = pickCurrency(get("TotalTax"));
+  const currency = invTot.code || subTot.code || totTax.code || null;
+
+  // Positionen
+  const itemsField = get("Items");
+  let items = [];
+  if (itemsField?.type === "array" && Array.isArray(itemsField.valueArray)) {
+    items = itemsField.valueArray.map((row) => {
+      const obj = row?.valueObject || {};
+      const desc = pickStr(obj.Description);
+      const qty  = (typeof obj?.Quantity?.valueNumber === "number") ? obj.Quantity.valueNumber : null;
+      const up   = pickCurrency(obj.UnitPrice).amount;
+      const amt  = pickCurrency(obj.Amount).amount;
+      const tax  = pickCurrency(obj.Tax).amount;
       return {
-        type: "read",
-        contentPreview: ar?.content ? String(ar.content).slice(0, 400) : null,
-        source: "prebuilt-read",
-        confidence: fallbackConf,
+        description: desc ?? null,
+        quantity: qty,
+        unitPrice: (up != null) ? round2(up) : null,
+        amount: (amt != null) ? round2(amt) : null,
+        tax: (tax != null) ? round2(tax) : null,
       };
-    }
-  } catch {
-    // Fallback unten
+    });
   }
-  return { type: model, contentPreview: null, source: "unknown", confidence: fallbackConf };
-}
 
-// Helpers
-function extractArray(node) {
-  if (!node) return [];
-  if (Array.isArray(node.values)) return node.values;
-  if (Array.isArray(node?.valueArray)) return node.valueArray;
-  return [];
-}
-function fieldProps(v) { return v?.properties || v?.fields || {}; }
-function pickText(f) {
-  if (!f) return null;
-  if (typeof f.content === "string") return f.content;
-  if (typeof f.valueString === "string") return f.valueString;
-  if (typeof f.valueDate === "string") return f.valueDate;
-  if (typeof f.valueCurrency === "string") return f.valueCurrency;
-  if ("value" in f && f.value != null) return String(f.value);
-  return null;
-}
-function pickNum(f) {
-  if (!f) return null;
-  if (typeof f.valueNumber === "number") return f.valueNumber;
-  if (f?.valueCurrency && typeof f.valueCurrency.amount === "number") return f.valueCurrency.amount;
-  if (typeof f.value === "number") return f.value;
-  return null;
+  // Fallbacks berechnen
+  let subtotal = (subTot.amount != null) ? round2(subTot.amount) : null;
+  if (subtotal == null) {
+    const sumItems = items.reduce((s, it) => s + (typeof it.amount === "number" ? it.amount : 0), 0);
+    if (sumItems > 0) subtotal = round2(sumItems);
+  }
+
+  let tax   = (totTax.amount != null) ? round2(totTax.amount) : null;
+  let total = (invTot.amount != null) ? round2(invTot.amount) : null;
+  if (total == null && subtotal != null && tax != null) total = round2(subtotal + tax);
+
+  // Letzter Fallback: wenn keinerlei Positionen erkannt, eine Sammelposition mit Gesamtbetrag
+  if (!items.length && (total != null)) {
+    items = [{ description: null, quantity: null, unitPrice: null, amount: total, tax }];
+  }
+
+  return {
+    type: doc.docType || modelId || "invoice",
+    vendorName: vendorName || null,
+    vendorVatId: vendorVatId || null,
+    invoiceNumber: invoiceNo || null,
+    invoiceDate: invoiceDate || null,   // ISO; UI kann in de-DE formatieren
+    dueDate: dueDate || null,
+    currency,
+    subtotal,
+    tax,
+    total,
+    items,
+    confidence: (typeof doc.confidence === "number") ? doc.confidence : (confidence ?? null),
+    source: modelId,
+  };
 }
