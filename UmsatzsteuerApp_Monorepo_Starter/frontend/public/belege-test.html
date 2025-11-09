@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <title>Belege – Testseite (AI Extractor)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { --bg:#0b0f19; --fg:#e5e7eb; --muted:#9ca3af; --card:#111827; --ok:#16a34a; --warn:#ea580c; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; background:var(--bg); color:var(--fg); }
+    header { padding:16px 20px; border-bottom:1px solid #1f2937; }
+    h1 { margin:0; font-size:18px; }
+    main { padding:20px; max-width:1100px; margin:auto; }
+    .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    input[type="text"] { width:460px; max-width:100%; padding:10px 12px; border:1px solid #374151; background:#0f172a; color:var(--fg); border-radius:10px; }
+    input[type="file"] { padding:8px; }
+    button { padding:10px 14px; background:#1f2937; border:1px solid #374151; color:var(--fg); border-radius:10px; cursor:pointer; }
+    button:hover { background:#111827; }
+    .card { background:var(--card); border:1px solid #1f2937; border-radius:14px; padding:16px; margin-top:16px; }
+    .grid { display:grid; grid-template-columns: 220px 1fr; gap:10px 16px; }
+    .muted { color:var(--muted); }
+    table { width:100%; border-collapse: collapse; margin-top:8px; }
+    th, td { border-bottom:1px solid #1f2937; padding:8px 10px; text-align:left; }
+    th { font-weight:600; }
+    .badge { display:inline-block; padding:4px 8px; border-radius:999px; font-size:12px; border:1px solid #334155; }
+    .ok { border-color:#166534; color:#86efac; }
+    .warn { border-color:#9a3412; color:#fdba74; }
+    pre { overflow:auto; background:#0f172a; border:1px solid #1f2937; border-radius:10px; padding:12px; }
+  </style>
+</head>
+<body>
+  <header><h1>Belege – Testseite (AI Extractor)</h1></header>
+  <main>
+    <div class="card">
+      <div class="row">
+        <label class="muted">Backend URL</label>
+        <input id="base" type="text" value="https://ai-extractor-31bt.onrender.com" />
+        <button id="btnHealth">/health prüfen</button>
+        <span id="healthOut" class="muted"></span>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <input id="file" type="file" accept="application/pdf,image/*" />
+        <button id="btnExtract">/extract ausführen</button>
+        <span id="status" class="muted"></span>
+      </div>
+    </div>
+
+    <div id="summary" class="card" style="display:none">
+      <h3 style="margin:0 0 8px 0">Zusammenfassung <span id="model" class="badge"></span> <span id="score" class="badge"></span></h3>
+      <div id="meta" class="grid"></div>
+    </div>
+
+    <div id="itemsCard" class="card" style="display:none">
+      <h3 style="margin:0 0 8px 0">Positionen</h3>
+      <table id="itemsTable">
+        <thead><tr>
+          <th>Beschreibung</th><th>Menge</th><th>Einheitspreis</th><th>Summe</th><th>Steuer</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <details class="card" style="margin-bottom:30px">
+      <summary>Rohdaten (Debug)</summary>
+      <pre id="raw">{}</pre>
+    </details>
+  </main>
+
+<script>
+const $ = s => document.querySelector(s);
+const fmt = v => (v===null||v===undefined||v==="") ? "–" : v;
+
+$("#btnHealth").onclick = async () => {
+  const base = $("#base").value.trim();
+  $("#healthOut").textContent = "prüfe …";
+  try {
+    const r = await fetch(base + "/health");
+    const t = await r.text();
+    $("#healthOut").textContent = r.ok ? "OK" : ("Fehler " + r.status);
+  } catch(e) {
+    $("#healthOut").textContent = "Netzwerkfehler";
+  }
+};
+
+$("#btnExtract").onclick = async () => {
+  const base = $("#base").value.trim();
+  const f = $("#file").files[0];
+  if (!f) { alert("Bitte eine Datei wählen."); return; }
+  $("#status").textContent = "lade hoch …";
+  const fd = new FormData(); fd.append("file", f);
+  try {
+    const res = await fetch(base + "/extract", { method:"POST", body: fd });
+    const json = await res.json();
+    $("#status").textContent = res.ok ? "fertig" : ("Fehler " + res.status);
+    renderResult(json);
+  } catch(e) {
+    $("#status").textContent = "Fehler: " + e;
+  }
+};
+
+function renderResult(resp){
+  $("#raw").textContent = JSON.stringify(resp, null, 2);
+  const { model, score, mapped } = resp || {};
+  if (!mapped) return;
+  $("#summary").style.display = "block";
+  $("#itemsCard").style.display = "none";
+
+  $("#model").textContent = "Modell: " + (model || "–");
+  $("#model").className = "badge";
+  $("#score").textContent = "Score: " + (typeof score==="number" ? score.toFixed(2) : "–");
+  $("#score").className = "badge " + ((score||0) >= 0.80 ? "ok" : "warn");
+
+  const meta = $("#meta");
+  meta.innerHTML = "";
+  const add = (k,v) => {
+    const kEl = document.createElement("div"); kEl.className="muted"; kEl.textContent = k;
+    const vEl = document.createElement("div"); vEl.textContent = fmt(v);
+    meta.appendChild(kEl); meta.appendChild(vEl);
+  };
+
+  if (mapped.type === "invoice") {
+    add("Lieferant", mapped.vendorName);
+    add("USt-IdNr.", mapped.vendorVatId);
+    add("Rechnungsnr.", mapped.invoiceNumber);
+    add("Rechnungsdatum", mapped.invoiceDate);
+    add("Fällig am", mapped.dueDate);
+    add("Währung", mapped.currency);
+    add("Zwischensumme", mapped.subtotal);
+    add("Steuer", mapped.tax);
+    add("Gesamt", mapped.total);
+    if (Array.isArray(mapped.items) && mapped.items.length) {
+      const tbody = $("#itemsTable tbody");
+      tbody.innerHTML = "";
+      mapped.items.forEach(it => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = "<td>"+fmt(it.description)+"</td>"+
+                       "<td>"+fmt(it.quantity)+"</td>"+
+                       "<td>"+fmt(it.unitPrice)+"</td>"+
+                       "<td>"+fmt(it.amount)+"</td>"+
+                       "<td>"+fmt(it.tax)+"</td>";
+        tbody.appendChild(tr);
+      });
+      $("#itemsCard").style.display = "block";
+    }
+  } else if (mapped.type === "receipt") {
+    add("Händler", mapped.merchantName);
+    add("Datum", mapped.transactionDate);
+    add("Uhrzeit", mapped.transactionTime);
+    add("Währung", mapped.currency);
+    add("Zwischensumme", mapped.subtotal);
+    add("Steuer", mapped.tax);
+    add("Trinkgeld", mapped.tip);
+    add("Gesamt", mapped.total);
+    if (Array.isArray(mapped.items) && mapped.items.length) {
+      const tbody = $("#itemsTable tbody");
+      tbody.innerHTML = "";
+      mapped.items.forEach(it => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = "<td>"+fmt(it.description)+"</td>"+
+                       "<td>"+fmt(it.quantity)+"</td>"+
+                       "<td>"+fmt(it.unitPrice)+"</td>"+
+                       "<td>"+fmt(it.totalPrice)+"</td>"+
+                       "<td>–</td>";
+        tbody.appendChild(tr);
+      });
+      $("#itemsCard").style.display = "block";
+    }
+  } else {
+    add("Typ", mapped.type);
+    add("Vorschau", mapped.contentPreview ? mapped.contentPreview.slice(0,200) + "…" : "–");
+  }
+}
+</script>
+</body>
+</html>
