@@ -4,9 +4,10 @@ import multer from "multer";
 import * as mapping from "./src/mapping.js";
 import { analyze } from "./src/azure.js";
 
-// toleranter Zugriff: named export ODER default
+// Toleranter Zugriff: named export ODER default
 const mapFromModel = mapping.mapFromModel ?? mapping.default;
 
+// Robustere Logs
 process.on("unhandledRejection", (r) => console.error("[unhandledRejection]", r));
 process.on("uncaughtException", (e) => console.error("[uncaughtException]", e));
 
@@ -17,6 +18,7 @@ app.use(cors({ origin: "*", methods: ["GET", "POST", "OPTIONS"] }));
 
 app.get("/health", (_, res) => res.json({ ok: true }));
 
+// Upload (im Speicher)
 const maxMB = parseInt(process.env.MAX_FILE_MB || "25", 10);
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -52,8 +54,7 @@ app.post("/extract", upload.single("file"), async (req, res) => {
     for (const model of order) {
       const { raw, confidence } = await analyze(model, buffer, contentType);
       const mapped = mapFromModel(model, raw, confidence);
-      const score =
-        typeof mapped?.confidence === "number" ? mapped.confidence : confidence || 0;
+      const score = typeof mapped?.confidence === "number" ? mapped.confidence : (confidence || 0);
 
       lastResult = { model, score, mapped, raw };
 
@@ -65,24 +66,9 @@ app.post("/extract", upload.single("file"), async (req, res) => {
           raw: includeRaw ? raw : undefined,
         });
       }
-      // sonst: nächstes Modell
+      // sonst: nächstes Modell probieren
     }
 
+    // Nichts über Schwelle → letztes Ergebnis zurückgeben (zur Diagnose)
     return res.json({
-      ...lastResult,
-      raw: includeRaw ? lastResult?.raw : undefined,
-    });
-  } catch (err) {
-    console.error("[/extract] error:", err);
-    const body =
-      process.env.DI_DEBUG === "true"
-        ? { error: "internal_error", detail: String(err?.message || err) }
-        : { error: "internal_error" };
-    res.status(500).json(body);
-  }
-});
-
-const port = process.env.PORT || 8787;
-app.listen(port, () => {
-  console.log(`[server] ai-extractor listening on :${port}`);
-});
+      ...lastResu
