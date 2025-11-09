@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Environment
+.env
+
+# Logs & cache
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+.tmp/
+
+# Builds & coverage (falls später genutzt)
+dist/
+coverage/
+
+# macOS
+.DS_Store
