@@ -71,4 +71,21 @@ app.post("/extract", upload.single("file"), async (req, res) => {
 
     // Nichts über Schwelle → letztes Ergebnis zurückgeben (zur Diagnose)
     return res.json({
-      ...lastResu
+      ...lastResult,
+      raw: includeRaw ? lastResult?.raw : undefined,
+    });
+  } catch (err) {
+    console.error("[/extract] error:", err);
+    const body =
+      process.env.DI_DEBUG === "true"
+        ? { error: "internal_error", detail: String(err?.message || err) }
+        : { error: "internal_error" };
+    res.status(500).json(body);
+  }
+});
+
+const port = process.env.PORT || 8787;
+app.listen(port, () => {
+  console.log(`[server] ai-extractor listening on :${port}`);
+});
+// EOF
