@@ -4,14 +4,23 @@ import multer from "multer";
 import { analyze } from "./src/azure.js";
 import { mapFromModel } from "./src/mapping.js";
 
-const app = express();
+// Diagnostik für unbehandelte Fehler:
+process.on("unhandledRejection", (r) => {
+  console.error("[unhandledRejection]", r);
+});
+process.on("uncaughtException", (e) => {
+  console.error("[uncaughtException]", e);
+  // nicht sofort exit – Render restarts; wir wollen Logs sehen
+});
 
-// Offen lassen; später gern auf deine Domain einschränken
+console.log("[server] booting…");
+
+const app = express();
 app.use(cors({ origin: "*", methods: ["GET", "POST", "OPTIONS"] }));
 
 app.get("/health", (_, res) => res.json({ ok: true }));
 
-// Upload (Memory)
+// Upload (im Speicher)
 const maxMB = parseInt(process.env.MAX_FILE_MB || "25", 10);
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -80,5 +89,5 @@ app.post("/extract", upload.single("file"), async (req, res) => {
 
 const port = process.env.PORT || 8787;
 app.listen(port, () => {
-  console.log(`ai-extractor listening on :${port}`);
+  console.log(`[server] ai-extractor listening on :${port}`);
 });
