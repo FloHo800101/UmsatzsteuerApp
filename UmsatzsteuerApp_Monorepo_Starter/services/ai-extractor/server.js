@@ -1,70 +1,84 @@
 import express from "express";
+import cors from "cors";
 import multer from "multer";
-import { analyzeWithAzure } from "./src/azure.js";
-import { mapToInternal } from "./src/mapping.js";
+import { analyze } from "./src/azure.js";
+import { mapFromModel } from "./src/mapping.js";
 
 const app = express();
-const upload = multer({ limits: { fileSize: 25 * 1024 * 1024 } });
-const PORT = process.env.PORT || 8787;
 
-// CORS simpel für DEV (für PROD: Origin einschränken)
-app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
-  if (req.method === "OPTIONS") return res.sendStatus(204);
-  next();
+// Offen lassen; später gern auf deine Domain einschränken
+app.use(cors({ origin: "*", methods: ["GET", "POST", "OPTIONS"] }));
+
+app.get("/health", (_, res) => res.json({ ok: true }));
+
+// Upload (Memory)
+const maxMB = parseInt(process.env.MAX_FILE_MB || "25", 10);
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: maxMB * 1024 * 1024 },
 });
 
-app.get("/health", (_req, res) => res.json({ ok: true }));
+const parseOrder = () =>
+  (process.env.DI_MODEL_ORDER || "invoice,receipt,layout,read")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+const thresholds = {
+  invoice: parseFloat(process.env.DI_THRESHOLD_INVOICE || "0.8"),
+  receipt: parseFloat(process.env.DI_THRESHOLD_RECEIPT || "0.8"),
+  layout: parseFloat(process.env.DI_THRESHOLD_LAYOUT || "0"),
+  read: parseFloat(process.env.DI_THRESHOLD_READ || "0"),
+};
+
+const includeRaw =
+  process.env.DI_DEBUG === "true" || process.env.NODE_ENV !== "production";
 
 app.post("/extract", upload.single("file"), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: "file_missing" });
+    if (!req.file) throw new Error("missing_file");
 
-    const modelOrder = (process.env.DI_MODEL_ORDER || "invoice,receipt,layout,read")
-      .split(",")
-      .map(s => s.trim().toLowerCase())
-      .filter(Boolean);
+    const buffer = req.file.buffer;
+    const contentType = req.file.mimetype || "application/octet-stream";
+    const order = parseOrder();
 
-    const thresholds = {
-      invoice: Number(process.env.DI_THRESHOLD_INVOICE ?? 0.8),
-      receipt: Number(process.env.DI_THRESHOLD_RECEIPT ?? 0.8),
-      layout: Number(process.env.DI_THRESHOLD_LAYOUT ?? 0.65),
-      read: Number(process.env.DI_THRESHOLD_READ ?? 0.0)
-    };
+    let lastResult = null;
 
-    let best = null;
+    for (const model of order) {
+      const { raw, confidence } = await analyze(model, buffer, contentType);
+      const mapped = mapFromModel(model, raw, confidence);
+      const score =
+        typeof mapped?.confidence === "number" ? mapped.confidence : confidence || 0;
 
-    for (const model of modelOrder) {
-      const { raw, score } = await analyzeWithAzure({
-        buffer: req.file.buffer,
-        model
-      });
+      lastResult = { model, score, mapped, raw };
 
-      if (!raw) continue;
-
-      const mapped = mapToInternal({ model, raw });
-      best = { model, score, mapped, raw };
-
-      // Early-Exit wenn Schwelle erreicht
-      if (score >= (thresholds[model] ?? 1)) break;
+      if (score >= (thresholds[model] ?? 0)) {
+        return res.json({
+          model,
+          score,
+          mapped,
+          raw: includeRaw ? raw : undefined,
+        });
+      }
+      // sonst: nächstes Modell probieren
     }
 
-    if (!best) return res.status(422).json({ error: "no_result" });
-
-    res.json({
-      model: best.model,
-      score: best.score,
-      mapped: best.mapped,
-      raw: best.raw // in PROD ggf. weglassen
+    // Nichts über Schwelle → letztes Ergebnis zurückgeben
+    return res.json({
+      ...lastResult,
+      raw: includeRaw ? lastResult?.raw : undefined,
     });
   } catch (err) {
-    console.error("extract error", err);
-    res.status(500).json({ error: "internal_error" });
+    console.error("[/extract] error:", err);
+    const body =
+      process.env.DI_DEBUG === "true"
+        ? { error: "internal_error", detail: String(err?.message || err) }
+        : { error: "internal_error" };
+    res.status(500).json(body);
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`ai-extractor listening on :${PORT}`);
+const port = process.env.PORT || 8787;
+app.listen(port, () => {
+  console.log(`ai-extractor listening on :${port}`);
 });
