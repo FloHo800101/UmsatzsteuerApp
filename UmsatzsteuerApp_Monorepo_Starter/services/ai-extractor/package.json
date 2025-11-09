@@ -5,9 +5,9 @@
   "type": "module",
   "engines": { "node": "20.11.1" },
   "scripts": {
-    "prestart": "node -e \"console.log('Node', process.version); console.log('NODE_VERSION env', process.env.NODE_VERSION||'-');\"",
+    "prestart": "node -e \"console.log('[prestart] Node', process.version); console.log('[prestart] NODE_VERSION env =', process.env.NODE_VERSION||'-');\"",
     "dev": "node --watch server.js",
-    "start": "node server.js"
+    "start": "node --trace-uncaught --trace-warnings start.mjs"
   },
   "dependencies": {
     "cors": "^2.8.5",
