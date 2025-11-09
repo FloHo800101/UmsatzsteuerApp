@@ -1,83 +1,133 @@
-const ENDPOINT = process.env.AZURE_DI_ENDPOINT;
-const KEY = process.env.AZURE_DI_KEY;
-const API_VERSION = process.env.AZURE_DI_API_VERSION || "2024-11-30";
+// Robust Azure Document Intelligence v4 REST-Client (defensives Polling)
+const endpointRaw = process.env.AZURE_DI_ENDPOINT || "";
+const endpoint = endpointRaw.replace(/\/+$/, ""); // ohne trailing slash
+const key = process.env.AZURE_DI_KEY || "";
+const apiVersion = process.env.AZURE_DI_API_VERSION || "2023-10-31";
+const DEBUG = process.env.DI_DEBUG === "true";
 
-// Offizielle prebuilt-Model-IDs (v4.0):
-//   prebuilt-invoice, prebuilt-receipt, prebuilt-layout, prebuilt-read
-const MODEL_ID = {
+/**
+ * Kurz-Namen → Modell-IDs
+ * POST {endpoint}/documentintelligence/documentModels/{modelId}:analyze?api-version=...
+ */
+const MODEL_IDS = {
   invoice: "prebuilt-invoice",
   receipt: "prebuilt-receipt",
   layout: "prebuilt-layout",
-  read: "prebuilt-read"
+  read: "prebuilt-read",
 };
 
-function ensureEnv() {
-  if (!ENDPOINT || !KEY) {
-    throw new Error("AZURE_DI_ENDPOINT / AZURE_DI_KEY not set");
+export async function analyze(model, buffer, _contentType = "application/octet-stream") {
+  if (!endpoint || !key) {
+    throw new Error("missing_azure_config (AZURE_DI_ENDPOINT/AZURE_DI_KEY)");
   }
-}
 
-function averageFieldConfidence(doc) {
-  if (!doc?.fields) return 0.0;
-  const values = Object.values(doc.fields);
-  const confidences = values
-    .map(v => v?.confidence)
-    .filter(c => typeof c === "number");
-  if (!confidences.length) return 0.0;
-  return confidences.reduce((a, b) => a + b, 0) / confidences.length;
-}
+  const modelId = MODEL_IDS[model] || model;
+  const url = `${endpoint}/documentintelligence/documentModels/${modelId}:analyze?api-version=${encodeURIComponent(apiVersion)}`;
 
-/**
- * v4.0 REST (synchron):
- *   POST {endpoint}/documentintelligence/documentModels/{modelId}:analyze
- *   ?_overload=analyzeDocument&api-version=YYYY-MM-DD
- * Body: { base64Source: "<...>" }  (alternativ: { urlSource: "<...>" })
- */
-export async function analyzeWithAzure({ buffer, model }) {
-  ensureEnv();
-  const modelId = MODEL_ID[model];
-  if (!modelId) return { raw: null, score: 0 };
-
-  const url =
-    `${ENDPOINT}/documentintelligence/documentModels/${modelId}:analyze` +
-    `?_overload=analyzeDocument&api-version=${API_VERSION}`;
-
-  const payload = { base64Source: buffer.toString("base64") };
-
-  const resp = await fetch(url, {
+  // 1) Analyse starten
+  const r = await fetch(url, {
     method: "POST",
     headers: {
-      "Ocp-Apim-Subscription-Key": KEY,
-      "Content-Type": "application/json"
+      "Ocp-Apim-Subscription-Key": key,
+      "Content-Type": "application/octet-stream",
+      "Accept": "application/json",
     },
-    body: JSON.stringify(payload)
+    body: buffer,
   });
 
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => "");
-    console.error("Azure analyze error", resp.status, text);
-    return { raw: null, score: 0 };
+  // Erwartet 202 + Operation-Location
+  if (r.status !== 202) {
+    const txt = await safeText(r);
+    throw new Error(`analyze ${modelId} failed: HTTP ${r.status} ${txt}`);
   }
+  const opLoc =
+    r.headers.get("operation-location") ||
+    r.headers.get("Operation-Location") ||
+    null;
+  if (!opLoc) throw new Error("missing operation-location header");
 
-  const raw = await resp.json();
+  // 2) Polling bis succeeded/failed/timeout
+  const started = Date.now();
+  while (true) {
+    await wait(1200);
 
-  // Scoring je Modell
-  let score = 0;
-  const firstDoc = raw?.documents?.[0];
+    const g = await fetch(opLoc, {
+      headers: {
+        "Ocp-Apim-Subscription-Key": key,
+        "Accept": "application/json",
+      },
+    });
 
-  if ((model === "invoice" || model === "receipt") && firstDoc) {
-    const fieldsAvg = averageFieldConfidence(firstDoc);
-    const docConf = typeof firstDoc.confidence === "number" ? firstDoc.confidence : fieldsAvg;
-    score = (fieldsAvg * 0.7) + (docConf * 0.3);
-  } else if (model === "layout") {
-    const hasTables = Array.isArray(raw?.tables) && raw.tables.length > 0;
-    const hasParagraphs = Array.isArray(raw?.paragraphs) && raw.paragraphs.length > 0;
-    score = (hasTables || hasParagraphs) ? 0.7 : 0.3;
-  } else if (model === "read") {
-    const text = typeof raw?.content === "string" ? raw.content : "";
-    const lineCount = text.split("\n").length;
-    score = lineCount > 50 ? 0.5 : 0.3;
+    // 202/204 → noch nicht fertig
+    if (g.status === 202 || g.status === 204) {
+      if (DEBUG) console.log(`[poll ${modelId}] HTTP ${g.status} (processing)`);
+      continue;
+    }
+
+    // Manche Zwischenzustände liefern 200, aber ohne Body → leer = weiter pollen
+    const txt = await safeText(g);
+    if (!txt || !txt.trim()) {
+      if (DEBUG) console.log(`[poll ${modelId}] HTTP ${g.status} empty body → continue`);
+      continue;
+    }
+
+    let data;
+    try {
+      data = JSON.parse(txt);
+    } catch (e) {
+      if (DEBUG) console.log(`[poll ${modelId}] JSON parse failed → continue`);
+      continue; // weiter pollen statt crashen
+    }
+
+    const status = data.status || data?.analyzeResult?.status;
+    if (status === "succeeded") {
+      const confidence = pickConfidence(data);
+      if (DEBUG) console.log(`[poll ${modelId}] succeeded (conf=${confidence?.toFixed?.(2) ?? "?"})`);
+      return { raw: data, confidence };
+    }
+    if (status === "failed") {
+      throw new Error(
+        `analysis failed for ${modelId}: ` + JSON.stringify(data?.errors || data)
+      );
+    }
+
+    // running/notStarted → weiter pollen
+    if (DEBUG) console.log(`[poll ${modelId}] status=${status || "unknown"} → continue`);
+
+    if (Date.now() - started > 60000) {
+      throw new Error(`timeout waiting for analysis (${modelId})`);
+    }
   }
+}
 
-  return { raw, score };
+// --- helpers ---
+function wait(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function safeText(res) {
+  try {
+    return await res.text();
+  } catch {
+    return "";
+  }
+}
+
+function pickConfidence(data) {
+  try {
+    const doc = data?.analyzeResult?.documents?.[0];
+    if (typeof doc?.confidence === "number") return doc.confidence;
+
+    // Fallback: Mittel der Field-Confidences (falls vorhanden)
+    const fields = doc?.fields || {};
+    const vals = Object.values(fields)
+      .map((f) => (typeof f?.confidence === "number" ? f.confidence : 0.5))
+      .filter((n) => !Number.isNaN(n));
+    if (vals.length) return vals.reduce((a, b) => a + b, 0) / vals.length;
+
+    // Layout/Read ohne Confidences → neutral
+    return 0.5;
+  } catch {
+    return 0.0;
+  }
 }
