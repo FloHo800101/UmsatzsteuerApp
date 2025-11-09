@@ -2,10 +2,10 @@ name: Pages: Deploy (frontend)
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
     paths:
       - 'UmsatzsteuerApp_Monorepo_Starter/frontend/**'
-      - 'frontend/**'
       - '.github/workflows/deploy-frontend.yml'
   workflow_dispatch:
 
@@ -15,7 +15,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: 'pages'
+  group: pages
   cancel-in-progress: true
 
 jobs:
@@ -25,49 +25,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Monorepo: korrektes Frontend-Verzeichnis ermitteln
-      - name: Pick frontend directory
-        id: pick
-        run: |
-          if [ -f "UmsatzsteuerApp_Monorepo_Starter/frontend/package.json" ]; then
-            echo "dir=UmsatzsteuerApp_Monorepo_Starter/frontend" >> $GITHUB_OUTPUT
-            echo "Using dir: UmsatzsteuerApp_Monorepo_Starter/frontend"
-          elif [ -f "frontend/package.json" ]; then
-            echo "dir=frontend" >> $GITHUB_OUTPUT
-            echo "Using dir: frontend"
-          else
-            echo "ERROR: No frontend directory found." >&2
-            exit 1
-          fi
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: npm
-          # beide Lockfiles cachen (egal welcher Pfad zutrifft)
-          cache-dependency-path: |
-            UmsatzsteuerApp_Monorepo_Starter/frontend/package-lock.json
-            frontend/package-lock.json
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: 'UmsatzsteuerApp_Monorepo_Starter/frontend/package-lock.json'
 
       - name: Install
-        working-directory: ${{ steps.pick.outputs.dir }}
-        run: npm ci || npm i
+        working-directory: UmsatzsteuerApp_Monorepo_Starter/frontend
+        run: npm ci
 
       - name: Build
-        working-directory: ${{ steps.pick.outputs.dir }}
+        working-directory: UmsatzsteuerApp_Monorepo_Starter/frontend
         run: npm run build
 
-      # SPA-Fallback: Deep-Links funktionieren auf GitHub Pages
-      - name: SPA 404 fallback
+      - name: SPA fallback & nojekyll
         run: |
-          cp "${{ steps.pick.outputs.dir }}/dist/index.html" "${{ steps.pick.outputs.dir }}/dist/404.html" || true
-          touch "${{ steps.pick.outputs.dir }}/dist/.nojekyll"
+          cp UmsatzsteuerApp_Monorepo_Starter/frontend/dist/index.html UmsatzsteuerApp_Monorepo_Starter/frontend/dist/404.html || true
+          touch UmsatzsteuerApp_Monorepo_Starter/frontend/dist/.nojekyll
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ${{ steps.pick.outputs.dir }}/dist
+          path: 'UmsatzsteuerApp_Monorepo_Starter/frontend/dist'
 
   deploy:
     needs: build
