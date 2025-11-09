@@ -3,8 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=20 <21" },
+  "engines": { "node": "20.11.1" },
   "scripts": {
+    "prestart": "node -e \"console.log('Node', process.version); console.log('NODE_VERSION env', process.env.NODE_VERSION||'-');\"",
     "dev": "node --watch server.js",
     "start": "node server.js"
   },
