@@ -5,7 +5,7 @@
   "type": "module",
   "engines": { "node": "20.11.1" },
   "scripts": {
-    "prestart": "node -e \"console.log('[prestart] Node', process.version); console.log('[prestart] NODE_VERSION env =', process.env.NODE_VERSION||'-');\"",
+    "prestart": "node -e \"console.log('[prestart] Node', process.version); console.log('[prestart] NODE_VERSION env =', process.env.NODE_VERSION||'-');\" && node --check server.js && node --check src/mapping.js && node --check src/azure.js",
     "dev": "node --watch server.js",
     "start": "node --trace-uncaught --trace-warnings start.mjs"
   },
