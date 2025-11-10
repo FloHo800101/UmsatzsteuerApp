@@ -1,20 +1,49 @@
 import express from 'express';
 import multer from 'multer';
+import cors from 'cors';
 import { runMigrations } from './run-migrations.js';
 import { saveFileAndDocument } from './persist.js';
 import { detectAndParseEinvoice } from './detectEinvoice.js';
 import { mapFromModel } from './normalize.js';
 import { extractWithAzure } from './azure.js';
 
-const upload = multer({ storage: multer.memoryStorage() });
 const app = express();
-app.use(express.json({ limit: '10mb' }));
+
+/** -----------------------------------------
+ *  CORS: nur deine Origins + lokal erlauben
+ *  ----------------------------------------- */
+const ALLOWED_ORIGINS = [
+  'https://floho800101.github.io',                // GitHub Pages (Root-Origin)
+  'http://localhost:5173',                        // Vite Dev
+  'http://localhost:4173'                         // Vite Preview
+];
+app.use(cors({
+  origin: (origin, cb) => {
+    // curl/Server-zu-Server (ohne Origin) erlauben
+    if (!origin) return cb(null, true);
+    // exakte Origin-Whitelist
+    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    return cb(new Error('CORS blocked for origin: ' + origin));
+  },
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: false
+}));
+app.options('*', cors());
+
+// Body/Upload Limits
+app.use(express.json({ limit: '25mb' }));
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 } // 25 MB
+});
 
 // Hinweis zu Azure-Keys beim Start
 if (!process.env.AZURE_ENDPOINT || !process.env.AZURE_KEY) {
   console.warn('[azure] Missing AZURE_ENDPOINT or AZURE_KEY – the /extract route will not use Azure.');
 }
 
+// Health (sendet CORS-Header durch globales cors())
 app.get('/health', (_req, res) => {
   res.json({ ok: true, service: 'ai-extractor' });
 });
@@ -34,15 +63,15 @@ app.post('/extract', upload.single('file'), async (req, res) => {
       raw = einv.raw;
       normalized = einv.normalized;
       model = 'einvoice:xml';
-      confidence = 1.0; // Parser-basiert
+      confidence = 1.0;
     } else {
-      // 2) Azure (falls Keys da)
+      // 2) Azure-Fallback (falls Keys gesetzt)
       const out = await extractWithAzure(buffer, mimetype);
       model = out.model;
       confidence = out.confidence ?? null;
       raw = out.raw ?? {};
       normalized = mapFromModel(raw);
-      docKind = 'invoice'; // default
+      docKind = 'invoice';
     }
 
     const persisted = await saveFileAndDocument({
@@ -72,14 +101,12 @@ app.post('/extract', upload.single('file'), async (req, res) => {
   }
 });
 
-// Serverstart inkl. Migrationen
 const PORT = process.env.PORT || 8080;
 async function start() {
   console.log('Applying migrations...');
   await runMigrations();
   app.listen(PORT, () => console.log(`ai-extractor listening on :${PORT}`));
 }
-
 start().catch(err => {
   console.error('startup error:', err);
   process.exit(1);
