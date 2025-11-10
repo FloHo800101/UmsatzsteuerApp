@@ -1,94 +1,212 @@
-// mapping.js – Azure DI → App-Format (robust inkl. Fallbacks)
+// services/ai-extractor/src/mapping.js
+// ESM-kompatibel (Node >= 18). Exportiert mapFromModel (named) + default.
 
-function round2(n) { return (typeof n === "number") ? Math.round(n * 100) / 100 : n; }
+// ---------- Hilfsfunktionen ----------
+const isString = (v) => typeof v === "string";
+const isNumber = (v) => typeof v === "number";
 
-function pickStr(f) {
-  if (!f) return null;
-  return typeof f.valueString === "string" ? f.valueString : (f.content ?? null);
-}
-function pickDate(f) {
-  if (!f) return null;
-  if (f.valueDate) return f.valueDate; // ISO (yyyy-mm-dd)
-  return pickStr(f);
-}
-function pickCurrency(f) {
-  if (!f) return { amount: null, code: null, symbol: null };
-  const vc = f.valueCurrency || {};
-  if (typeof vc.amount === "number")
-    return { amount: vc.amount, code: vc.currencyCode || null, symbol: vc.currencySymbol || null };
-  if (typeof f.valueNumber === "number")
-    return { amount: f.valueNumber, code: null, symbol: null };
-  return { amount: null, code: null, symbol: null };
-}
-
-export function mapFromAzure(raw, modelId, confidence) {
-  const doc = raw?.analyzeResult?.documents?.[0] || {};
-  const fields = doc.fields || {};
-  const get = (name) => fields[name];
-
-  // Stammdaten
-  const vendorName   = pickStr(get("VendorName"));
-  const vendorVatId  = pickStr(get("VendorTaxId")) || pickStr(get("VendorVatId")) || pickStr(get("VendorRegistrationId"));
-  const invoiceNo    = pickStr(get("InvoiceId")) || pickStr(get("InvoiceNumber"));
-  const invoiceDate  = pickDate(get("InvoiceDate"));
-  const dueDate      = pickDate(get("DueDate"));
-
-  // Beträge
-  const invTot = pickCurrency(get("InvoiceTotal"));
-  const subTot = pickCurrency(get("SubTotal"));
-  const totTax = pickCurrency(get("TotalTax"));
-  const currency = invTot.code || subTot.code || totTax.code || null;
-
-  // Positionen
-  const itemsField = get("Items");
-  let items = [];
-  if (itemsField?.type === "array" && Array.isArray(itemsField.valueArray)) {
-    items = itemsField.valueArray.map((row) => {
-      const obj = row?.valueObject || {};
-      const desc = pickStr(obj.Description);
-      const qty  = (typeof obj?.Quantity?.valueNumber === "number") ? obj.Quantity.valueNumber : null;
-      const up   = pickCurrency(obj.UnitPrice).amount;
-      const amt  = pickCurrency(obj.Amount).amount;
-      const tax  = pickCurrency(obj.Tax).amount;
-      return {
-        description: desc ?? null,
-        quantity: qty,
-        unitPrice: (up != null) ? round2(up) : null,
-        amount: (amt != null) ? round2(amt) : null,
-        tax: (tax != null) ? round2(tax) : null,
-      };
-    });
+const toNumber = (v) => {
+  if (v == null) return null;
+  if (isNumber(v)) return v;
+  if (isString(v)) {
+    // deutsche Formatierung "1.234,56" -> 1234.56
+    const cleaned = v.replace(/\s/g, "").replace(/\./g, "").replace(",", ".");
+    const num = Number.parseFloat(cleaned);
+    return Number.isFinite(num) ? num : null;
   }
+  return null;
+};
 
-  // Fallbacks berechnen
-  let subtotal = (subTot.amount != null) ? round2(subTot.amount) : null;
-  if (subtotal == null) {
-    const sumItems = items.reduce((s, it) => s + (typeof it.amount === "number" ? it.amount : 0), 0);
-    if (sumItems > 0) subtotal = round2(sumItems);
-  }
+const getStr = (field) => field?.valueString ?? field?.content ?? null;
+const getDateStr = (field) =>
+  // Behalte bevorzugt das Format aus dem Dokument (z. B. 07.10.2022)
+  field?.content ?? field?.valueDate ?? null;
 
-  let tax   = (totTax.amount != null) ? round2(totTax.amount) : null;
-  let total = (invTot.amount != null) ? round2(invTot.amount) : null;
-  if (total == null && subtotal != null && tax != null) total = round2(subtotal + tax);
+const getCurrencyAmount = (field) =>
+  field?.valueCurrency?.amount ??
+  toNumber(field?.content ?? field?.valueString);
 
-  // Letzter Fallback: wenn keinerlei Positionen erkannt, eine Sammelposition mit Gesamtbetrag
-  if (!items.length && (total != null)) {
-    items = [{ description: null, quantity: null, unitPrice: null, amount: total, tax }];
-  }
+const getCurrencyCodeFromField = (field) => {
+  const code = field?.valueCurrency?.currencyCode;
+  if (code) return code;
+  const sym = field?.valueCurrency?.currencySymbol || field?.content || "";
+  if (sym.includes("€")) return "EUR";
+  if (sym.includes("$")) return "USD";
+  if (sym.includes("£")) return "GBP";
+  return null;
+};
+
+const safeArray = (a) => (Array.isArray(a) ? a : []);
+const firstDoc = (ar) => (ar && Array.isArray(ar.documents) ? ar.documents[0] : null);
+
+// ---------- Mapper für INVOICE ----------
+function mapInvoiceDoc(doc) {
+  const f = doc?.fields ?? {};
+
+  // Items (Invoice)
+  const items = safeArray(f?.Items?.valueArray).map((entry) => {
+    const o = entry?.valueObject ?? {};
+    const qty =
+      o?.Quantity?.valueNumber ??
+      toNumber(o?.Quantity?.content ?? o?.Quantity?.valueString);
+    const unitPrice =
+      o?.UnitPrice?.valueCurrency?.amount ??
+      o?.Price?.valueCurrency?.amount ??
+      toNumber(o?.UnitPrice?.content ?? o?.Price?.content);
+    const amount =
+      o?.Amount?.valueCurrency?.amount ??
+      o?.TotalPrice?.valueCurrency?.amount ??
+      toNumber(o?.Amount?.content ?? o?.TotalPrice?.content);
+
+    return {
+      description: getStr(o?.Description),
+      quantity: qty ?? null,
+      unitPrice: unitPrice ?? null,
+      amount: amount ?? null,
+      tax:
+        o?.Tax?.valueCurrency?.amount ??
+        toNumber(o?.Tax?.content ?? o?.Tax?.valueString) ??
+        null,
+    };
+  });
+
+  // Steuerbetrag: TotalTax oder erster Eintrag in TaxDetails
+  const taxFromDetails = (() => {
+    const td = safeArray(f?.TaxDetails?.valueArray);
+    if (!td.length) return null;
+    const obj = td[0]?.valueObject;
+    return obj?.Amount?.valueCurrency?.amount ?? toNumber(obj?.Amount?.content);
+  })();
+
+  const totalField = f?.InvoiceTotal;
+  const subtotalField = f?.SubTotal;
 
   return {
-    type: doc.docType || modelId || "invoice",
-    vendorName: vendorName || null,
-    vendorVatId: vendorVatId || null,
-    invoiceNumber: invoiceNo || null,
-    invoiceDate: invoiceDate || null,   // ISO; UI kann in de-DE formatieren
-    dueDate: dueDate || null,
-    currency,
-    subtotal,
-    tax,
-    total,
+    type: "invoice",
+    vendorName: getStr(f?.VendorName) ?? getStr(f?.VendorAddressRecipient),
+    vendorVatId: getStr(f?.VendorTaxId) ?? null,
+    invoiceNumber: getStr(f?.InvoiceId),
+    invoiceDate: getDateStr(f?.InvoiceDate),
+    dueDate: getDateStr(f?.DueDate),
+    currency: getCurrencyCodeFromField(totalField) ?? getCurrencyCodeFromField(subtotalField),
+    subtotal: getCurrencyAmount(subtotalField),
+    tax: getCurrencyAmount(f?.TotalTax) ?? taxFromDetails,
+    total: getCurrencyAmount(totalField),
     items,
-    confidence: (typeof doc.confidence === "number") ? doc.confidence : (confidence ?? null),
-    source: modelId,
+    confidence: doc?.confidence ?? null,
+    source: "prebuilt-invoice",
   };
 }
+
+// ---------- Mapper für RECEIPT ----------
+function mapReceiptDoc(doc) {
+  const f = doc?.fields ?? {};
+
+  const items = safeArray(f?.Items?.valueArray).map((entry) => {
+    const o = entry?.valueObject ?? {};
+    // Azure Receipt-Felder heißen meist Description/Quantity/Price/TotalPrice
+    return {
+      description: getStr(o?.Description),
+      quantity:
+        o?.Quantity?.valueNumber ??
+        toNumber(o?.Quantity?.content ?? o?.Quantity?.valueString),
+      unitPrice:
+        o?.Price?.valueCurrency?.amount ??
+        toNumber(o?.Price?.content ?? o?.Price?.valueString),
+      amount:
+        o?.TotalPrice?.valueCurrency?.amount ??
+        toNumber(o?.TotalPrice?.content ?? o?.TotalPrice?.valueString),
+      tax:
+        o?.Tax?.valueCurrency?.amount ??
+        toNumber(o?.Tax?.content ?? o?.Tax?.valueString) ??
+        null,
+    };
+  });
+
+  const totalField = f?.Total;
+  const subtotalField = f?.Subtotal;
+
+  return {
+    type: "receipt",
+    vendorName: getStr(f?.MerchantName),
+    vendorVatId: null, // bei Kassenbelegen selten explizit vorhanden
+    invoiceNumber: null,
+    invoiceDate: getDateStr(f?.TransactionDate),
+    dueDate: null,
+    currency: getCurrencyCodeFromField(totalField) ?? getCurrencyCodeFromField(subtotalField),
+    subtotal: getCurrencyAmount(subtotalField),
+    tax: getCurrencyAmount(f?.Tax),
+    total: getCurrencyAmount(totalField),
+    items,
+    confidence: doc?.confidence ?? null,
+    source: "prebuilt-receipt",
+  };
+}
+
+// ---------- Heuristischer Fallback für layout/read ----------
+function mapHeuristicFromContent(analyzeResult) {
+  const content = analyzeResult?.content || "";
+
+  // sehr einfache Heuristiken für NETTO/BRUTTO/MWST
+  const num = (s) => (s ? toNumber(s) : null);
+  const rx = (label) =>
+    new RegExp(`${label}\\s*[:\\-]?\\s*([0-9\\.\\s]*,[0-9]{2}|[0-9]+\\.[0-9]{2})`, "i");
+
+  const mNetto = content.match(rx("NETTO"));
+  const mBrutto = content.match(rx("BRUTTO|TOTAL|SUMME"));
+  const mMwst = content.match(rx("MWST|MwSt|UST|USt|VAT|Tax"));
+
+  // Datum rudimentär (DD.MM.YYYY)
+  const mDate = content.match(/\b([0-3]?\d\.[01]?\d\.\d{4})\b/);
+  // einfacher Name oben im Dokument (erste Zeile bis Zeilenumbruch)
+  const firstLine = content.split(/\n/)[0]?.trim() || null;
+
+  return {
+    type: "ocr",
+    vendorName: firstLine || null,
+    vendorVatId: null,
+    invoiceNumber: null,
+    invoiceDate: mDate ? mDate[1] : null,
+    dueDate: null,
+    currency: content.includes("€") ? "EUR" : null,
+    subtotal: num(mNetto?.[1]),
+    tax: num(mMwst?.[1]),
+    total: num(mBrutto?.[1]),
+    items: [],
+    confidence: null,
+    source: analyzeResult?.modelId || "layout/read",
+  };
+}
+
+// ---------- Dispatcher ----------
+function _dispatchMap(model, raw) {
+  const ar = raw?.analyzeResult ?? raw; // toleriert raw oder raw.analyzeResult
+  const modelId = (model || ar?.modelId || "").toLowerCase();
+  const doc = firstDoc(ar);
+
+  if (modelId.includes("prebuilt-invoice") && doc) {
+    return mapInvoiceDoc(doc);
+  }
+  if (modelId.includes("prebuilt-receipt") && doc) {
+    return mapReceiptDoc(doc);
+  }
+
+  // Fallback: layout/read → heuristisch aus analyzeResult.content
+  return mapHeuristicFromContent(ar);
+}
+
+// ---------- Öffentliche API ----------
+// Toleriert beide Aufrufvarianten: (model, raw) **oder** (raw, model)
+export function mapFromAzure(...args) {
+  let model, raw;
+  if (typeof args[0] === "string") {
+    [model, raw] = args; // (model, raw)
+  } else {
+    [raw, model] = args; // (raw, model)
+  }
+  return _dispatchMap(model, raw);
+}
+
+// Alias, damit server.js beide Exporte nutzen kann:
+export const mapFromModel = (...args) => mapFromAzure(...args);
+export default mapFromAzure;
