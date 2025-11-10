@@ -1,121 +1,106 @@
-import "dotenv/config";
+// services/ai-extractor/src/server.js
 import express from "express";
-import multer from "multer";
-import crypto from "crypto";
-import { analyzeSequential } from "./azure.js";
-import { mapFromAzure } from "./map.js";
-import { insertDocumentWithDetails, pool } from "./db.js";
+import Busboy from "busboy";
+import { persistReceipt } from "./persist.js";
+import { detectEinvoiceFromBytes } from "./detectEinvoice.js";
+import { normalizeForDb } from "./normalize.js";
+import { execSync } from "node:child_process";
+import { analyzeWithAzure } from "./azure.js";
 
 const app = express();
 app.use(express.json({ limit: "20mb" }));
 
-const upload = multer({ storage: multer.memoryStorage() });
+app.get("/health", (_, res) => res.json({ ok: true }));
 
-app.get("/health", async (_req, res) => {
+if (String(process.env.RUN_MIGRATIONS || "").toLowerCase() === "true") {
   try {
-    await pool.query("select 1");
-    res.json({ ok: true });
+    execSync("node src/run-migrations.js", { stdio: "inherit" });
   } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
+    console.error("Migration error:", e.message);
   }
-});
+}
 
-/**
- * POST /extract?persist=true
- * FormData:
- *  - file: (PDF/JPG/PNG)
- * Optional JSON body fields (falls Frontend sie mitsendet) werden zurzeit ignoriert.
- */
-app.post("/extract", upload.single("file"), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: "missing file" });
-    }
+app.post("/extract", (req, res) => {
+  const bb = Busboy({ headers: req.headers, limits: { files: 1, fileSize: 20 * 1024 * 1024 } });
 
-    const buf = req.file.buffer;
-    const mime = req.file.mimetype || "application/pdf";
-    const filename = req.file.originalname;
-    const fileSize = req.file.size;
-    const fileSha256 = crypto.createHash("sha256").update(buf).digest("hex");
+  let fileName = null;
+  let mimeType = null;
+  const chunks = [];
 
-    // 1) Azure DI
-    const { model, result } = await analyzeSequential(buf, mime);
+  bb.on("file", (_, file, info) => {
+    fileName = info.filename;
+    mimeType = info.mimeType;
+    file.on("data", (d) => chunks.push(d));
+  });
 
-    // 2) Mapping
-    const { mapped, items, taxes, modelConfidence } = mapFromAzure(
-      model,
-      result,
-      { defaultChart: process.env.DEFAULT_CHART_OF_ACCOUNTS || "SKR03" }
-    );
+  bb.on("finish", async () => {
+    try {
+      const fileBytes = Buffer.concat(chunks);
 
-    const persist =
-      String(req.query.persist || "true").toLowerCase() !== "false";
+      // 1) Heuristik für eRechnung
+      const xmlInfo = detectEinvoiceFromBytes(fileName, mimeType, fileBytes);
 
-    let documentId = null;
+      // 2) Azure nur, wenn kein eRechnung-Hinweis
+      let model = null, score = null, mapped = null, raw = null;
+      if (xmlInfo.xmlType === "none") {
+        const out = await analyzeWithAzure(fileBytes, fileName);
+        model = out.model;
+        score = out.score ?? null;
+        mapped = out.mapped || {};
+        raw = out.raw || out;
+      } else {
+        // Minimal: wir speichern die XML-Infos; echte Parser liefern wir als nächsten Schritt
+        mapped = {
+          vendorName: null,
+          vendorVatId: null,
+          buyerName: null,
+          buyerVatId: null,
+          invoiceNumber: null,
+          invoiceDate: null,
+          dueDate: null,
+          currency: "EUR",
+          subtotal: null,
+          tax: null,
+          total: null,
+          items: [],
+          confidence: 1.0,
+          source: xmlInfo.xmlType
+        };
+        model = "einvoice";
+        score = 1.0;
+        raw = { xml: xmlInfo.xmlRaw, xmlType: xmlInfo.xmlType, xmlVersion: xmlInfo.xmlVersion };
+      }
 
-    if (persist) {
-      // 3) Persistenz
-      documentId = await insertDocumentWithDetails({
-        meta: {
-          filename,
-          fileMime: mime,
-          fileSize,
-          fileSha256,
-          sourceModel: model,
-          modelConfidence: modelConfidence != null ? Number(modelConfidence) : null
-        },
+      // 3) Normalisieren & Speichern
+      const normalized = normalizeForDb({
+        fileName,
+        mimeType,
+        xmlInfo,
+        model,
+        score,
         mapped,
-        raw: result,
-        items,
-        taxes,
-        fileBytes: buf
+        raw
       });
+
+      const { receiptId, fileSha256 } = await persistReceipt(normalized, fileBytes);
+
+      res.json({
+        model,
+        score,
+        mapped,
+        raw,
+        receipt_id: receiptId,
+        file_sha256: fileSha256,
+        db_status: "saved"
+      });
+    } catch (err) {
+      console.error("extract failed:", err);
+      res.status(500).json({ error: "internal_error", detail: String(err?.message || err) });
     }
+  });
 
-    return res.json({
-      ok: true,
-      docId: documentId,
-      model,
-      modelConfidence,
-      mapped,
-      items,
-      taxes,
-      raw: result
-    });
-  } catch (e) {
-    console.error(e);
-    return res.status(500).json({ ok: false, error: String(e?.message || e) });
-  }
+  req.pipe(bb);
 });
 
-/**
- * GET /documents/:id
- * Einfacher Reader für das Frontend (z. B. Preview/Details)
- */
-app.get("/documents/:id", async (req, res) => {
-  const { id } = req.params;
-  try {
-    const doc = await pool.query("select * from documents where id = $1", [id]);
-    if (!doc.rows.length) return res.status(404).json({ error: "not found" });
-    const items = await pool.query(
-      "select * from document_items where document_id = $1 order by line_no asc",
-      [id]
-    );
-    const taxes = await pool.query(
-      "select * from document_taxes where document_id = $1",
-      [id]
-    );
-    res.json({
-      document: doc.rows[0],
-      items: items.rows,
-      taxes: taxes.rows
-    });
-  } catch (e) {
-    res.status(500).json({ error: String(e?.message || e) });
-  }
-});
-
-const port = Number(process.env.PORT || 8080);
-app.listen(port, () => {
-  console.log(`ai-extractor listening on :${port}`);
-});
+const port = process.env.PORT || 3000;
+app.listen(port, () => console.log(`ai-extractor listening on ${port}`));
