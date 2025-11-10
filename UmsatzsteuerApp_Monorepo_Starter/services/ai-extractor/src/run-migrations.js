@@ -1,60 +1,54 @@
-// services/ai-extractor/src/run-migrations.js
-import { query } from "./db.js";
-import { readdir, readFile } from "node:fs/promises";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { query } from './db.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const MIGR_DIR = path.join(__dirname, "..", "migrations");
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const MIGRATIONS_DIR = path.join(__dirname, '..', 'migrations');
 
 async function ensureMigrationsTable() {
   await query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
-      id SERIAL PRIMARY KEY,
+      id BIGSERIAL PRIMARY KEY,
       filename TEXT UNIQUE NOT NULL,
-      applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    )
+      applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
   `);
 }
 
-async function appliedSet() {
-  const { rows } = await query(`SELECT filename FROM schema_migrations`);
-  return new Set(rows.map(r => r.filename));
+async function alreadyApplied(filename) {
+  const { rows } = await query(
+    'SELECT 1 FROM schema_migrations WHERE filename = $1 LIMIT 1',
+    [filename]
+  );
+  return rows.length > 0;
 }
 
-async function applyMigration(fileName, sql) {
-  console.log(`Applying migration ${fileName}...`);
-  await query("BEGIN");
+async function applyMigration(filename, sql) {
   try {
+    await query('BEGIN');
     await query(sql);
-    await query(`INSERT INTO schema_migrations(filename) VALUES ($1)`, [fileName]);
-    await query("COMMIT");
-    console.log(`✅ ${fileName} applied`);
+    await query('INSERT INTO schema_migrations (filename) VALUES ($1)', [filename]);
+    await query('COMMIT');
+    console.log(`✅ ${filename} applied`);
   } catch (e) {
-    await query("ROLLBACK");
-    console.error(`❌ ${fileName} failed:`, e.message);
+    await query('ROLLBACK');
+    console.error(`❌ ${filename} failed: ${e.message}`);
     throw e;
   }
 }
 
-export default async function runMigrations() {
+export async function runMigrations() {
   await ensureMigrationsTable();
-  const files = (await readdir(MIGR_DIR))
-    .filter(f => f.endsWith(".sql"))
-    .sort();
-  const done = await appliedSet();
+  const files = fs
+    .readdirSync(MIGRATIONS_DIR)
+    .filter(f => f.endsWith('.sql'))
+    .sort(); // alphabetisch/nummerisch
 
   for (const f of files) {
-    if (done.has(f)) continue;
-    const sql = await readFile(path.join(MIGR_DIR, f), "utf8");
+    if (await alreadyApplied(f)) continue;
+    const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, f), 'utf8');
     await applyMigration(f, sql);
   }
-}
-
-// Allow CLI run: node src/run-migrations.js
-if (process.argv[1] && process.argv[1].endsWith("run-migrations.js")) {
-  runMigrations().catch(err => {
-    console.error("Migration error:", err);
-    process.exit(1);
-  });
 }
