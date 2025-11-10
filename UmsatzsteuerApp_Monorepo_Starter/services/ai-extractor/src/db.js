@@ -1,26 +1,20 @@
-// services/ai-extractor/src/db.js
-import { Pool } from "pg";
-
-function needsSSL(connectionString) {
-  if (String(process.env.PGSSLMODE || "").toLowerCase() === "require" ||
-      String(process.env.PGSSLMODE || "").toLowerCase() === "true") {
-    return true;
-  }
-  return /\bsslmode\s*=\s*require\b/i.test(String(connectionString || ""));
-}
+import pg from 'pg';
+const { Pool } = pg;
 
 const connectionString = process.env.DATABASE_URL;
+if (!connectionString) {
+  console.error('[db] Missing env DATABASE_URL');
+}
 
-export const pool = new Pool({
+const pool = new Pool({
   connectionString,
-  ssl: needsSSL(connectionString) ? { rejectUnauthorized: false } : undefined
+  ssl: { rejectUnauthorized: false } // Render-Postgres mit sslmode=require
 });
 
-export async function query(sql, params) {
-  const client = await pool.connect();
-  try {
-    return await client.query(sql, params);
-  } finally {
-    client.release();
-  }
+export async function query(text, params) {
+  return pool.query(text, params);
+}
+
+export async function getClient() {
+  return pool.connect();
 }
