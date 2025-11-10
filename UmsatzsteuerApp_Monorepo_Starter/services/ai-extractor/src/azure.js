@@ -1,288 +1,216 @@
 // services/ai-extractor/src/azure.js
-// Minimaler Azure Document Intelligence Client mit Fallback-Logik:
-// 1) prebuilt-invoice → 2) prebuilt-receipt → 3) layout → 4) read
+// Sequentielle Analyse mit Azure Document Intelligence:
+// 1) prebuilt-invoice  → wenn score >= threshold → fertig
+// 2) prebuilt-receipt  → wenn score >= threshold → fertig
+// 3) prebuilt-layout   → (keine sicheren Felder, Mindest-Score 0.25)
+// 4) read              → (reiner Text, Score 0.10)
 
-const endpoint = process.env.AZURE_ENDPOINT?.replace(/\/+$/, "") || "";
-const apiKey = process.env.AZURE_KEY || "";
-const apiVersion = process.env.AZURE_API_VERSION || "2023-10-31";
-const THRESH = Number(process.env.MODEL_CONFIDENCE_THRESHOLD || 0.8);
+const AZURE_ENDPOINT = process.env.AZURE_ENDPOINT;
+const AZURE_KEY = process.env.AZURE_KEY;
+const API_VERSION = process.env.AZURE_API_VERSION || "2023-10-31";
 
-function ensureEnv() {
-  if (!endpoint || !apiKey) {
-    throw new Error("AZURE_ENDPOINT/AZURE_KEY not set");
-  }
+if (!AZURE_ENDPOINT || !AZURE_KEY) {
+  console.warn("[azure] Missing AZURE_ENDPOINT or AZURE_KEY – the /extract route will fail against Azure.");
 }
 
-async function postAnalyze(modelId, bytes) {
-  const url = `${endpoint}/documentintelligence/documentModels/${modelId}:analyze?api-version=${apiVersion}`;
+const SLEEP = (ms) => new Promise(r => setTimeout(r, ms));
+
+async function pollResult(opLocation) {
+  // Azure DI gibt eine Operation-URL zurück, die wir pollen müssen.
+  for (let i = 0; i < 40; i++) {
+    const r = await fetch(opLocation, {
+      method: "GET",
+      headers: { "Ocp-Apim-Subscription-Key": AZURE_KEY }
+    });
+    if (!r.ok) throw new Error(`Azure poll failed: ${r.status} ${r.statusText}`);
+    const j = await r.json();
+    const status = j.status || j?.analyzeResult?.status;
+    if (status === "succeeded") return j;
+    if (status === "failed") throw new Error("Azure analysis failed");
+    await SLEEP(1000);
+  }
+  throw new Error("Azure poll timeout");
+}
+
+async function analyzeModel(modelId, bytes, mimeType) {
+  const url = `${AZURE_ENDPOINT}/formrecognizer/documentModels/${modelId}:analyze?api-version=${API_VERSION}`;
   const r = await fetch(url, {
     method: "POST",
     headers: {
-      "Content-Type": "application/octet-stream",
-      // Für DI gilt i.d.R. dieser Header; "api-key" funktioniert in neuen Regionen ebenfalls.
-      "Ocp-Apim-Subscription-Key": apiKey,
-      "api-key": apiKey
+      "Ocp-Apim-Subscription-Key": AZURE_KEY,
+      "Content-Type": mimeType || "application/octet-stream"
     },
     body: bytes
   });
-
   if (r.status !== 202) {
-    const t = await r.text().catch(() => "");
-    throw new Error(`Azure analyze POST failed: ${r.status} ${t}`);
+    const txt = await r.text().catch(() => "");
+    throw new Error(`Azure analyze ${modelId} returned ${r.status}: ${txt}`);
   }
   const op = r.headers.get("operation-location");
-  if (!op) throw new Error("Azure missing operation-location header");
-  return await pollOperation(op);
+  if (!op) throw new Error("Missing operation-location header from Azure");
+  const result = await pollResult(op);
+  return result;
 }
 
-async function pollOperation(opUrl) {
-  for (let i = 0; i < 60; i++) {
-    const r = await fetch(opUrl, {
-      headers: {
-        "Ocp-Apim-Subscription-Key": apiKey,
-        "api-key": apiKey
+function mapInvoiceLike(doc) {
+  // doc = analyzeResult documents[0]
+  const f = (doc && doc.fields) || {};
+  const val = (k) => f[k]?.value || f[k]?.content || null;
+  const conf = (k) => f[k]?.confidence ?? null;
+
+  // Basisfelder
+  const currency = f["InvoiceTotal"]?.valueCurrency?.code || f["Total"]?.valueCurrency?.code || null;
+  const total = f["InvoiceTotal"]?.valueNumber ?? f["Total"]?.valueNumber ?? null;
+  const subtotal = f["Subtotal"]?.valueNumber ?? null;
+
+  // Steuer (simples Mapping)
+  let tax = null;
+  if (f["TotalTax"]?.valueNumber != null) tax = f["TotalTax"].valueNumber;
+  else if (f["Tax"]?.valueNumber != null) tax = f["Tax"].valueNumber;
+
+  // Parteien
+  const vendorName = val("VendorName") || val("MerchantName") || null;
+  const vendorVatId = val("VendorVATRegistrationNumber") || null;
+  const buyerName = val("CustomerName") || val("BillToCustomerName") || null;
+  const buyerVatId = val("CustomerVATRegistrationNumber") || null;
+
+  // Rechnungsinfos
+  const invoiceNumber = val("InvoiceId") || val("InvoiceNumber") || null;
+  const invoiceDate = f["InvoiceDate"]?.valueDate || null;
+  const dueDate = f["DueDate"]?.valueDate || null;
+
+  // Bank
+  const iban = val("VendorIBAN") || null;
+  const bic = val("VendorSWIFT") || null;
+
+  // Positionen (wenn verfügbar)
+  const items = [];
+  const lineItems = f["Items"]?.valueArray || f["Items"]?.value || [];
+  if (Array.isArray(lineItems)) {
+    for (const [i, li] of lineItems.entries()) {
+      const lf = li?.valueObject?.properties || li?.valueObject || li?.properties || {};
+      const get = (key) => lf[key]?.value ?? lf[key]?.content ?? null;
+      const desc = get("Description") || get("ProductCode") || null;
+      const qty = lf["Quantity"]?.valueNumber ?? null;
+      const unitPrice = lf["UnitPrice"]?.valueNumber ?? null;
+      const amountNet = lf["Amount"]?.valueNumber ?? null;
+      // TaxRate ist oft nicht direkt vorhanden
+      const taxRate = lf["TaxRate"]?.valueNumber ?? null;
+      items.push({
+        positionNo: i + 1,
+        description: desc,
+        quantity: qty,
+        unitPrice,
+        amountNet,
+        taxRate
+      });
+    }
+  }
+
+  // Score: nimm Mittel aus ein paar Kernfeldern
+  const confidences = [
+    conf("InvoiceTotal") ?? conf("Total"),
+    conf("Subtotal"),
+    conf("TotalTax") ?? conf("Tax"),
+    conf("VendorName") ?? conf("MerchantName"),
+    conf("CustomerName") ?? conf("BillToCustomerName")
+  ].filter((x) => typeof x === "number");
+  const score =
+    confidences.length ? Math.max(0.1, Math.min(1, confidences.reduce((a, b) => a + b, 0) / confidences.length)) : 0.5;
+
+  return {
+    score,
+    mapped: {
+      source: "azure",
+      currency,
+      total,
+      subtotal,
+      tax,
+      vendorName,
+      vendorVatId,
+      buyerName,
+      buyerVatId,
+      invoiceNumber,
+      invoiceDate,
+      dueDate,
+      iban,
+      bic,
+      items
+    }
+  };
+}
+
+function mapLayoutRead(docOrResult) {
+  // Für layout/read haben wir keine strukturierten Felder → liefern Rohtext und minimale Felder
+  // Wir geben eine niedrige, aber >0 Score zurück.
+  const content = docOrResult?.analyzeResult?.content || "";
+  return {
+    score: docOrResult?.modelId?.includes("layout") ? 0.25 : 0.10,
+    mapped: {
+      source: "azure",
+      currency: null,
+      total: null,
+      subtotal: null,
+      tax: null,
+      vendorName: null,
+      buyerName: null,
+      items: []
+    },
+    rawText: content
+  };
+}
+
+export async function extractWithAzure({ bytes, mimeType, threshold }) {
+  // 1) invoice
+  try {
+    const inv = await analyzeModel("prebuilt-invoice", bytes, mimeType);
+    const doc = inv?.analyzeResult?.documents?.[0] || null;
+    if (doc) {
+      const m = mapInvoiceLike(doc);
+      if (m.score >= threshold) {
+        return { model: "invoice", score: m.score, mapped: m.mapped, raw: inv };
       }
-    });
-    if (!r.ok) {
-      const t = await r.text().catch(() => "");
-      throw new Error(`Azure poll failed: ${r.status} ${t}`);
+      // sonst weiter testen
+      var best = { model: "invoice", score: m.score, mapped: m.mapped, raw: inv };
     }
-    const data = await r.json();
-    const status = data.status || data?.analyzeResult?.status;
-    if (status === "succeeded") return data;
-    if (status === "failed") throw new Error("Azure analyze failed");
-    await new Promise((res) => setTimeout(res, 1000));
+  } catch (e) {
+    // still fallback
+    var best = null;
   }
-  throw new Error("Azure analyze timed out");
-}
 
-function avgConfidenceFromFields(obj) {
-  if (!obj || typeof obj !== "object") return null;
-  let sum = 0;
-  let n = 0;
-
-  const scan = (v) => {
-    if (!v) return;
-    if (typeof v.confidence === "number") {
-      sum += v.confidence;
-      n++;
-    }
-    if (v.valueObject && typeof v.valueObject === "object") {
-      Object.values(v.valueObject).forEach(scan);
-    }
-    if (Array.isArray(v.valueArray)) {
-      v.valueArray.forEach(scan);
-    }
-    if (v.fields && typeof v.fields === "object") {
-      Object.values(v.fields).forEach(scan);
-    }
-  };
-
-  if (obj.fields) {
-    Object.values(obj.fields).forEach(scan);
-  } else {
-    Object.values(obj).forEach(scan);
-  }
-  return n ? sum / n : null;
-}
-
-function pickField(doc, name) {
-  return doc?.fields?.[name]?.content ?? doc?.fields?.[name]?.value ?? doc?.fields?.[name]?.valueString ?? null;
-}
-function pickNum(doc, name) {
-  const v = doc?.fields?.[name]?.valueNumber ?? doc?.fields?.[name]?.valueCurrency?.amount ?? doc?.fields?.[name]?.content;
-  const n = Number(String(v).replace(",", "."));
-  return Number.isFinite(n) ? n : null;
-}
-function pickDate(doc, name) {
-  return doc?.fields?.[name]?.valueDate ?? doc?.fields?.[name]?.content ?? null;
-}
-function pickCurrencyCode(doc, nameTotal) {
-  // versucht Währung an Total/SubTotal zu finden
-  const c =
-    doc?.fields?.[nameTotal]?.valueCurrency?.currencyCode ??
-    doc?.fields?.Total?.valueCurrency?.currencyCode ??
-    doc?.fields?.SubTotal?.valueCurrency?.currencyCode ??
-    null;
-  return c || null;
-}
-
-function mapInvoice(analyze) {
-  const doc = analyze?.analyzeResult?.documents?.[0];
-  const score = avgConfidenceFromFields(doc) ?? null;
-  const mapped = {
-    vendorName: pickField(doc, "VendorName"),
-    vendorVatId: pickField(doc, "VendorTaxId") || pickField(doc, "VendorVatNumber"),
-    buyerName: pickField(doc, "CustomerName"),
-    buyerVatId: pickField(doc, "CustomerTaxId") || pickField(doc, "CustomerVatNumber"),
-    invoiceNumber: pickField(doc, "InvoiceId") || pickField(doc, "InvoiceNumber"),
-    invoiceDate: pickDate(doc, "InvoiceDate"),
-    dueDate: pickDate(doc, "DueDate"),
-    currency: pickCurrencyCode(doc, "Total") || "EUR",
-    subtotal: pickNum(doc, "SubTotal"),
-    tax: pickNum(doc, "TotalTax") ?? pickNum(doc, "Tax"),
-    total: pickNum(doc, "Total"),
-    iban: pickField(doc, "VendorBankAccountNumber") || null,
-    bic: pickField(doc, "VendorBankBic") || null,
-    items: [],
-    confidence: score ?? undefined,
-    source: "azure:invoice"
-  };
-
-  // Items
-  const items = doc?.fields?.Items?.valueArray || [];
-  mapped.items = items.map((it, idx) => {
-    const f = it?.valueObject?.fields || it?.fields || {};
-    const q = f?.Quantity?.valueNumber ?? null;
-    const up =
-      f?.UnitPrice?.valueCurrency?.amount ??
-      f?.UnitPrice?.valueNumber ??
-      null;
-    const amt =
-      f?.Amount?.valueCurrency?.amount ??
-      f?.Amount?.valueNumber ??
-      null;
-    return {
-      positionNo: idx + 1,
-      description: f?.Description?.content ?? null,
-      quantity: q,
-      unitPrice: up,
-      amountNet: amt,
-      taxRate: f?.TaxRate?.valueNumber ?? null
-    };
-  });
-
-  return { model: "invoice", score, mapped, raw: analyze };
-}
-
-function mapReceipt(analyze) {
-  const doc = analyze?.analyzeResult?.documents?.[0];
-  const score = avgConfidenceFromFields(doc) ?? null;
-  const mapped = {
-    vendorName: pickField(doc, "MerchantName"),
-    vendorVatId: null,
-    buyerName: null,
-    buyerVatId: null,
-    invoiceNumber: pickField(doc, "TransactionId") || null,
-    invoiceDate: pickDate(doc, "TransactionDate"),
-    dueDate: null,
-    currency: pickCurrencyCode(doc, "Total") || "EUR",
-    subtotal: pickNum(doc, "SubTotal"),
-    tax: pickNum(doc, "TotalTax") ?? pickNum(doc, "Tax"),
-    total: pickNum(doc, "Total"),
-    iban: null,
-    bic: null,
-    items: [],
-    confidence: score ?? undefined,
-    source: "azure:receipt"
-  };
-
-  const items = doc?.fields?.Items?.valueArray || [];
-  mapped.items = items.map((it, idx) => {
-    const f = it?.valueObject?.fields || it?.fields || {};
-    const q = f?.Quantity?.valueNumber ?? null;
-    const up =
-      f?.UnitPrice?.valueCurrency?.amount ??
-      f?.UnitPrice?.valueNumber ??
-      null;
-    const amt =
-      f?.TotalPrice?.valueCurrency?.amount ??
-      f?.TotalPrice?.valueNumber ??
-      null;
-    return {
-      positionNo: idx + 1,
-      description: f?.Description?.content ?? null,
-      quantity: q,
-      unitPrice: up,
-      amountNet: amt,
-      taxRate: null
-    };
-  });
-
-  return { model: "receipt", score, mapped, raw: analyze };
-}
-
-function mapLayout(analyze) {
-  // Layout liefert Seiten/Spans – hier nur minimaler Stub
-  const score = null;
-  const mapped = {
-    vendorName: null,
-    vendorVatId: null,
-    buyerName: null,
-    buyerVatId: null,
-    invoiceNumber: null,
-    invoiceDate: null,
-    dueDate: null,
-    currency: "EUR",
-    subtotal: null,
-    tax: null,
-    total: null,
-    iban: null,
-    bic: null,
-    items: [],
-    confidence: null,
-    source: "azure:layout"
-  };
-  return { model: "layout", score, mapped, raw: analyze };
-}
-
-function mapRead(analyze) {
-  const score = null;
-  const mapped = {
-    vendorName: null,
-    vendorVatId: null,
-    buyerName: null,
-    buyerVatId: null,
-    invoiceNumber: null,
-    invoiceDate: null,
-    dueDate: null,
-    currency: "EUR",
-    subtotal: null,
-    tax: null,
-    total: null,
-    iban: null,
-    bic: null,
-    items: [],
-    confidence: null,
-    source: "azure:read"
-  };
-  return { model: "read", score, mapped, raw: analyze };
-}
-
-export async function analyzeWithAzure(bytes /*, fileName */) {
-  ensureEnv();
-
-  // 1) Invoice
+  // 2) receipt
   try {
-    const inv = await postAnalyze("prebuilt-invoice", bytes);
-    const mapped = mapInvoice(inv);
-    if ((mapped.score ?? 0) >= THRESH || mapped.mapped.invoiceNumber || mapped.mapped.total) {
-      return mapped;
+    const rec = await analyzeModel("prebuilt-receipt", bytes, mimeType);
+    const doc = rec?.analyzeResult?.documents?.[0] || null;
+    if (doc) {
+      const m = mapInvoiceLike(doc); // viele Felder sind ähnlich benannt
+      if (m.score >= threshold) {
+        return { model: "receipt", score: m.score, mapped: m.mapped, raw: rec };
+      }
+      if (!best || m.score > best.score) best = { model: "receipt", score: m.score, mapped: m.mapped, raw: rec };
     }
-  } catch (_) {
-    // fall through
+  } catch (e) {
+    // ignore, fallback
   }
 
-  // 2) Receipt
+  // 3) layout
   try {
-    const rec = await postAnalyze("prebuilt-receipt", bytes);
-    const mapped = mapReceipt(rec);
-    if ((mapped.score ?? 0) >= THRESH || mapped.mapped.total || mapped.mapped.vendorName) {
-      return mapped;
-    }
-  } catch (_) {
-    // fall through
+    const lay = await analyzeModel("prebuilt-layout", bytes, mimeType);
+    const m = mapLayoutRead(lay);
+    if (!best || m.score > best.score) best = { model: "layout", score: m.score, mapped: m.mapped, raw: lay };
+  } catch (e) {
+    // ignore
   }
 
-  // 3) Layout
+  // 4) read
   try {
-    const lay = await postAnalyze("prebuilt-layout", bytes);
-    return mapLayout(lay);
-  } catch (_) {
-    // fall through
+    const rd = await analyzeModel("prebuilt-read", bytes, mimeType);
+    const m = mapLayoutRead(rd);
+    if (!best || m.score > best.score) best = { model: "read", score: m.score, mapped: m.mapped, raw: rd };
+  } catch (e) {
+    // ignore
   }
 
-  // 4) Read
-  const read = await postAnalyze("prebuilt-read", bytes);
-  return mapRead(read);
+  if (!best) throw new Error("Azure analysis failed across all models");
+  return best;
 }
