@@ -1,106 +1,143 @@
 // services/ai-extractor/src/server.js
 import express from "express";
-import Busboy from "busboy";
-import { persistReceipt } from "./persist.js";
+import cors from "cors";
+import multer from "multer";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+
+import runMigrations from "./run-migrations.js";
 import { detectEinvoiceFromBytes } from "./detectEinvoice.js";
 import { normalizeForDb } from "./normalize.js";
-import { execSync } from "node:child_process";
-import { analyzeWithAzure } from "./azure.js";
+import { persistReceipt } from "./persist.js";
+import { extractWithAzure } from "./azure.js";
+import { query } from "./db.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
-app.use(express.json({ limit: "20mb" }));
+app.use(cors());
+app.use(express.json({ limit: "10mb" }));
 
-app.get("/health", (_, res) => res.json({ ok: true }));
+// Multer im Speicher (wir speichern die Bytes in RAM und reichen sie an Azure/DB weiter)
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
-if (String(process.env.RUN_MIGRATIONS || "").toLowerCase() === "true") {
+const PORT = Number(process.env.PORT || 8080);
+const MODEL_CONFIDENCE_THRESHOLD = Number(process.env.MODEL_CONFIDENCE_THRESHOLD || "0.80");
+
+// Health
+app.get("/health", async (_req, res) => {
+  res.json({ ok: true, service: "ai-extractor", ts: new Date().toISOString() });
+});
+
+// --- Feedback-Endpunkt (Korrekturen vom Frontend zurückschreiben) ---
+app.post("/feedback", async (req, res) => {
   try {
-    execSync("node src/run-migrations.js", { stdio: "inherit" });
+    const { receiptId, patch, chartOfAccounts } = req.body || {};
+    if (!receiptId) return res.status(400).json({ error: "receiptId missing" });
+
+    if (patch && typeof patch === "object") {
+      await query(
+        `UPDATE receipts SET mapped_json = mapped_json || $1::jsonb WHERE id = $2`,
+        [JSON.stringify(patch), receiptId]
+      );
+    }
+    if (chartOfAccounts && typeof chartOfAccounts === "string") {
+      await query(`UPDATE receipts SET chart_of_accounts = $1 WHERE id = $2`, [chartOfAccounts, receiptId]);
+    }
+
+    res.json({ ok: true });
   } catch (e) {
-    console.error("Migration error:", e.message);
+    console.error("feedback error:", e);
+    res.status(500).json({ error: "feedback_failed", detail: e.message });
+  }
+});
+
+// --- Haupt-Endpunkt: Datei analysieren & speichern ---
+app.post("/extract", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "file_missing" });
+
+    const bytes = req.file.buffer;
+    const fileName = req.file.originalname || "upload";
+    const mimeType = req.file.mimetype || "application/octet-stream";
+
+    // 1) Einfache Heuristik für eRechnung (XRechnung / ZUGFeRD / Factur-X / UBL)
+    const xmlInfo = detectEinvoiceFromBytes(fileName, mimeType, bytes);
+
+    // 2) Azure-DI sequentiell (invoice -> receipt -> layout -> read)
+    const az = await extractWithAzure({
+      bytes,
+      mimeType,
+      threshold: MODEL_CONFIDENCE_THRESHOLD
+    });
+    // az: { model, score, mapped, raw }
+
+    // 3) Normalisieren (inkl. xml-Metadaten)
+    const normalized = normalizeForDb({
+      fileName,
+      mimeType,
+      xmlInfo,
+      model: az.model,
+      score: az.score,
+      mapped: az.mapped,
+      raw: { azure: az.raw, xml: xmlInfo?.xmlRaw || null }
+    });
+
+    // 4) Persistieren (inkl. Items)
+    const saved = await persistReceipt(normalized, bytes);
+
+    res.json({
+      ok: true,
+      receiptId: saved.receiptId,
+      model: normalized.model,
+      score: normalized.score,
+      chartOfAccounts: normalized.chartOfAccounts,
+      xmlType: normalized.xmlType,
+      totals: {
+        currency: normalized.currency,
+        subtotal: normalized.subtotal,
+        tax: normalized.tax,
+        total: normalized.total,
+        taxRateGuess: normalized.taxRateGuess
+      },
+      parties: {
+        creditorName: normalized.creditorName,
+        debtorName: normalized.debtorName,
+        vendorVatId: normalized.vendorVatId,
+        buyerVatId: normalized.buyerVatId
+      }
+    });
+  } catch (e) {
+    console.error("extract error:", e);
+    res.status(500).json({ error: "extract_failed", detail: e.message });
+  }
+});
+
+// Einfache Detail-Ansicht (für Debug)
+app.get("/receipts/:id", async (req, res) => {
+  try {
+    const { rows } = await query(`SELECT * FROM receipts WHERE id = $1`, [req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: "not_found" });
+    res.json(rows[0]);
+  } catch (e) {
+    console.error("get receipt error:", e);
+    res.status(500).json({ error: "read_failed", detail: e.message });
+  }
+});
+
+async function start() {
+  try {
+    if (String(process.env.RUN_MIGRATIONS || "").toLowerCase() === "true") {
+      await runMigrations();
+    }
+    app.listen(PORT, () => {
+      console.log(`ai-extractor listening on ${PORT}`);
+    });
+  } catch (e) {
+    console.error("startup error:", e);
+    process.exit(1);
   }
 }
 
-app.post("/extract", (req, res) => {
-  const bb = Busboy({ headers: req.headers, limits: { files: 1, fileSize: 20 * 1024 * 1024 } });
-
-  let fileName = null;
-  let mimeType = null;
-  const chunks = [];
-
-  bb.on("file", (_, file, info) => {
-    fileName = info.filename;
-    mimeType = info.mimeType;
-    file.on("data", (d) => chunks.push(d));
-  });
-
-  bb.on("finish", async () => {
-    try {
-      const fileBytes = Buffer.concat(chunks);
-
-      // 1) Heuristik für eRechnung
-      const xmlInfo = detectEinvoiceFromBytes(fileName, mimeType, fileBytes);
-
-      // 2) Azure nur, wenn kein eRechnung-Hinweis
-      let model = null, score = null, mapped = null, raw = null;
-      if (xmlInfo.xmlType === "none") {
-        const out = await analyzeWithAzure(fileBytes, fileName);
-        model = out.model;
-        score = out.score ?? null;
-        mapped = out.mapped || {};
-        raw = out.raw || out;
-      } else {
-        // Minimal: wir speichern die XML-Infos; echte Parser liefern wir als nächsten Schritt
-        mapped = {
-          vendorName: null,
-          vendorVatId: null,
-          buyerName: null,
-          buyerVatId: null,
-          invoiceNumber: null,
-          invoiceDate: null,
-          dueDate: null,
-          currency: "EUR",
-          subtotal: null,
-          tax: null,
-          total: null,
-          items: [],
-          confidence: 1.0,
-          source: xmlInfo.xmlType
-        };
-        model = "einvoice";
-        score = 1.0;
-        raw = { xml: xmlInfo.xmlRaw, xmlType: xmlInfo.xmlType, xmlVersion: xmlInfo.xmlVersion };
-      }
-
-      // 3) Normalisieren & Speichern
-      const normalized = normalizeForDb({
-        fileName,
-        mimeType,
-        xmlInfo,
-        model,
-        score,
-        mapped,
-        raw
-      });
-
-      const { receiptId, fileSha256 } = await persistReceipt(normalized, fileBytes);
-
-      res.json({
-        model,
-        score,
-        mapped,
-        raw,
-        receipt_id: receiptId,
-        file_sha256: fileSha256,
-        db_status: "saved"
-      });
-    } catch (err) {
-      console.error("extract failed:", err);
-      res.status(500).json({ error: "internal_error", detail: String(err?.message || err) });
-    }
-  });
-
-  req.pipe(bb);
-});
-
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`ai-extractor listening on ${port}`));
+start();
