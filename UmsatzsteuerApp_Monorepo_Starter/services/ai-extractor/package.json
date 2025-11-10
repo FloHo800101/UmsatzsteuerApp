@@ -1,17 +1,23 @@
 {
   "name": "ai-extractor",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
-  "engines": { "node": "20.11.1" },
+  "main": "src/server.js",
   "scripts": {
-    "prestart": "node -e \"console.log('[prestart] Node', process.version); console.log('[prestart] NODE_VERSION env =', process.env.NODE_VERSION||'-');\" && node --check server.js && node --check src/mapping.js && node --check src/azure.js",
-    "dev": "node --watch server.js",
-    "start": "node --trace-uncaught --trace-warnings start.mjs"
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "migrate": "node src/migrate.js"
   },
   "dependencies": {
-    "cors": "^2.8.5",
+    "axios": "^1.7.2",
+    "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "multer": "^1.4.5-lts.1"
+    "multer": "^1.4.5-lts.2",
+    "pg": "^8.11.3",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
   }
 }
