@@ -19,8 +19,9 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Install
-        run: npm ci
+      - name: Install (frontend-belegpruefung)
+        working-directory: UmsatzsteuerApp_Monorepo_Starter/frontend-belegpruefung
+        run: npm ci || npm i
 
       - name: Run unit tests
         run: npm -w frontend-belegpruefung run test:unit
