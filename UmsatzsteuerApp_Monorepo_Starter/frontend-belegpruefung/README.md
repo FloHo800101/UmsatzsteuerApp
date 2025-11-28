@@ -21,3 +21,5 @@ E2E Tests (Playwright):
 npm -w frontend-belegpruefung run dev &
 npm -w frontend-belegpruefung run test:e2e
 ```
+
+<!-- trigger: test rake -->
