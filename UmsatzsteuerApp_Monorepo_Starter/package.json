@@ -3,6 +3,7 @@
   "private": true,
   "workspaces": [
     "frontend",
+    "frontend-belegpruefung",
     "services/*",
     "packages/*"
   ],
@@ -10,6 +11,9 @@
     "dev:frontend": "npm -w frontend run dev",
     "build:frontend": "npm -w frontend run build",
     "test:frontend": "npm -w frontend run test",
+    "dev:belegpruefung": "npm -w frontend-belegpruefung run dev",
+    "build:belegpruefung": "npm -w frontend-belegpruefung run build",
+    "test:belegpruefung": "npm -w frontend-belegpruefung run test",
     "test:services": "npm -w services/api-gateway run test && npm -w services/extractor-mock run test && npm -w services/elster-adapter-mock run test && npm -w services/exporter run test"
   }
 }

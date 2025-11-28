@@ -1,0 +1,38 @@
+name: "Test Belegprüfungs Frontend"
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+    paths:
+      - "UmsatzsteuerApp_Monorepo_Starter/frontend-belegpruefung/**"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install
+        run: npm ci
+
+      - name: Run unit tests
+        run: npm -w frontend-belegpruefung run test:unit
+
+      - name: Build & preview
+        run: |
+          npm -w frontend-belegpruefung run build
+          npm -w frontend-belegpruefung run preview -- --port 5173 &
+          sleep 3
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps
+
+      - name: Run e2e tests
+        run: npm -w frontend-belegpruefung run test:e2e
