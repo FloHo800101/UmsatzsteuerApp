@@ -23,6 +23,16 @@ jobs:
         working-directory: UmsatzsteuerApp_Monorepo_Starter/frontend-belegpruefung
         run: npm ci || npm i
 
+      - name: Diagnostic environment
+        run: |
+          node -v || true
+          npm -v || true
+          pwd
+          ls -la
+          ls -la UmsatzsteuerApp_Monorepo_Starter/frontend-belegpruefung
+          cat UmsatzsteuerApp_Monorepo_Starter/frontend-belegpruefung/package.json
+          npx vitest --version || true
+
       - name: Run unit tests (verbose)
         run: npm -w frontend-belegpruefung run test:unit -- --reporter verbose || npm -w frontend-belegpruefung run test:unit -- --run --reporter verbose
 
