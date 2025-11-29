@@ -22,7 +22,10 @@ jobs:
           if [ "$code" = "200" ]; then
             # accept the new BelegVollständigkeitsApp or the older label for backward compatibility
             GREP=\"BelegVollständigkeitsApp\"
-            grep -q "$GREP" body.txt && exit 0
+              # check for either the new or previous label
+              if grep -q "BelegVollständigkeitsApp" body.txt || grep -q "BelegprüfungsApp" body.txt ; then
+                exit 0
+              fi
           fi
           echo "---- response ----"; cat body.txt || true; echo "-------------------"
           exit 1
