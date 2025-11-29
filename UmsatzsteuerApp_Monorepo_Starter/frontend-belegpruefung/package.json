@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest",
-    "test:unit": "vitest --run",
+    "test:unit": "vitest --run --environment jsdom --reporter verbose",
     "test:e2e": "playwright test --project=chromium"
   },
   "dependencies": {
