@@ -20,7 +20,9 @@ jobs:
           code=$(curl -s -o body.txt -w "%{http_code}" "$URL" || true)
           echo "HTTP $code"
           if [ "$code" = "200" ]; then
-            grep -q "BelegprüfungsApp" body.txt && exit 0
+            # accept the new BelegVollständigkeitsApp or the older label for backward compatibility
+            GREP=\"BelegVollständigkeitsApp\"
+            grep -q "$GREP" body.txt && exit 0
           fi
           echo "---- response ----"; cat body.txt || true; echo "-------------------"
           exit 1
