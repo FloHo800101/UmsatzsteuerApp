@@ -34,9 +34,13 @@ jobs:
         working-directory: UmsatzsteuerApp_Monorepo_Starter/frontend-belegpruefung
         run: npm ci || npm i
 
-      - name: Build
+      - name: Build (force base)
         working-directory: UmsatzsteuerApp_Monorepo_Starter/frontend-belegpruefung
-        run: npm run build
+        run: npm run build -- --base /UmsatzsteuerApp/
+
+      - name: Diagnose built index.html
+        working-directory: UmsatzsteuerApp_Monorepo_Starter/frontend-belegpruefung
+        run: sed -n '1,120p' dist/index.html || true
 
       - name: Prepare Pages artifact (SPA fallback + nojekyll)
         run: |
