@@ -1,0 +1,26 @@
+name: "Pages Smoke Test - BelegprüfungsApp"
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *' # every 6 hours
+  push:
+    branches: [ main ]
+    paths:
+      - "UmsatzsteuerApp_Monorepo_Starter/frontend-belegpruefung/**"
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check deployed page
+        run: |
+          URL=https://floho800101.github.io/UmsatzsteuerApp/
+          echo "Pinging $URL"
+          code=$(curl -s -o body.txt -w "%{http_code}" "$URL" || true)
+          echo "HTTP $code"
+          if [ "$code" = "200" ]; then
+            grep -q "BelegprüfungsApp" body.txt && exit 0
+          fi
+          echo "---- response ----"; cat body.txt || true; echo "-------------------"
+          exit 1
