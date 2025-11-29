@@ -34,7 +34,9 @@ jobs:
           npx vitest --version || true
 
       - name: Run unit tests (verbose)
-        run: npm -w frontend-belegpruefung run test:unit -- --reporter verbose || npm -w frontend-belegpruefung run test:unit -- --run --reporter verbose
+        run: |
+          set -o pipefail
+          npm -w frontend-belegpruefung run test:unit -- --reporter verbose 2>&1 | tee test-unit.log
 
       - name: Build & preview
         run: |
