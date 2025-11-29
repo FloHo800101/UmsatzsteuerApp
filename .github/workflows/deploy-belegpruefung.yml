@@ -41,14 +41,14 @@ jobs:
         working-directory: UmsatzsteuerApp_Monorepo_Starter/frontend-belegpruefung
         run: npm ci || npm i
 
-      - name: Build (force base & capture logs)
+      - name: Build (force relative base & capture logs)
         working-directory: UmsatzsteuerApp_Monorepo_Starter/frontend-belegpruefung
         env:
           VITE_BASE: '/UmsatzsteuerApp/'
         run: |
           echo "PWD: $(pwd)";
-          echo "Run build with base: /UmsatzsteuerApp/";
-          npm run build -- --base /UmsatzsteuerApp/ 2>&1 | tee build.log || (cat build.log && exit 1)
+          echo "Run build with base: ./";
+          npm run build -- --base ./ 2>&1 | tee build.log || (cat build.log && exit 1)
 
       - name: Diagnose built index.html
         working-directory: UmsatzsteuerApp_Monorepo_Starter/frontend-belegpruefung

@@ -7,8 +7,8 @@ export default defineConfig({
   build: {
     outDir: 'dist'
   },
-  // For GitHub Pages project site (floho800101.github.io/UmsatzsteuerApp)
-  // ensure built assets reference the repo base path so the scripts load correctly
-  base: '/UmsatzsteuerApp/'
+  // Use relative base so built assets are referenced relatively (works with GitHub Pages repo site)
+  // This avoids issues when hosting under a subpath and helps in local previews.
+  base: './'
   }
 })
