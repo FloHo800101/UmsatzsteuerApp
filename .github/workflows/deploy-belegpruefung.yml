@@ -56,8 +56,10 @@ jobs:
 
       - name: Prepare Pages artifact (SPA fallback + nojekyll)
         run: |
-          cp UmsatzsteuerApp_Monorepo_Starter/frontend-belegpruefung/dist/index.html UmsatzsteuerApp_Monorepo_Starter/frontend-belegpruefung/dist/404.html || true
-          touch UmsatzsteuerApp_Monorepo_Starter/frontend-belegpruefung/dist/.nojekyll
+          DIST=UmsatzsteuerApp_Monorepo_Starter/frontend-belegpruefung/dist
+          echo "Preparing artifact in $DIST"
+          cp "$DIST/index.html" "$DIST/404.html" || true
+          touch "$DIST/.nojekyll" || true
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
