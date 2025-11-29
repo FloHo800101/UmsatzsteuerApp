@@ -61,6 +61,12 @@ jobs:
           cp "$DIST/index.html" "$DIST/404.html" || true
           touch "$DIST/.nojekyll" || true
 
+      - name: Prepare artifact summary
+        working-directory: UmsatzsteuerApp_Monorepo_Starter/frontend-belegpruefung
+        run: |
+          echo "dist size:"; du -sh dist || true
+          echo "dist listing:"; ls -la dist || true
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
