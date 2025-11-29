@@ -4,5 +4,6 @@ import App from '../App'
 
 test('zeigt BelegprüfungsApp Titel', () => {
   render(<App />)
-  expect(screen.getByText(/BelegprüfungsApp/i)).toBeInTheDocument()
+  // prefer to search by role for robustness
+  expect(screen.getByRole('heading', { name: /BelegprüfungsApp/i })).toBeInTheDocument()
 })
