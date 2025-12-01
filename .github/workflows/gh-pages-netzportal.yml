@@ -26,7 +26,23 @@ jobs:
         run: npm run build
         working-directory: ./netzportal-prototype
 
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps
+        working-directory: ./netzportal-prototype
+
+      - name: Serve built site
+        run: |
+          npx http-server ./dist -p 8080 &
+          for i in {1..30}; do curl -sSf http://localhost:8080 && break || sleep 1; done
+        working-directory: ./netzportal-prototype
+
+      - name: Run Playwright smoke tests
+        run: |
+          APP_URL=http://localhost:8080 npx playwright test e2e/smoke.spec.ts --project=chromium -c playwright.config.ts --reporter=list
+        working-directory: ./netzportal-prototype
+
       - name: Deploy to GitHub Pages (netzportal-prototype/dist)
+        if: success()
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
