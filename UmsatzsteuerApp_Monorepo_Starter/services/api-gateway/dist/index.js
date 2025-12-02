@@ -1,4 +1,0 @@
-import app from './app';
-const port = process.env.PORT || 8080;
-app.listen(port, () => console.log('api-gateway listening on :' + port));
-//# sourceMappingURL=index.js.map
