@@ -67,10 +67,29 @@ jobs:
           echo "dist size:"; du -sh dist || true
           echo "dist listing:"; ls -la dist || true
 
-      - name: Upload artifact
+      - name: Print build log
+        working-directory: UmsatzsteuerApp_Monorepo_Starter/frontend-belegpruefung
+        run: |
+          echo '---- build.log ----'; cat build.log || true; echo '-------------------'
+
+      - name: Zip dist for upload debugging
+        working-directory: UmsatzsteuerApp_Monorepo_Starter/frontend-belegpruefung
+        run: |
+          echo 'Zipping dist to site.zip'; zip -r site.zip dist || true
+          du -sh site.zip || true
+
+      - name: Upload artifact (directory)
+        working-directory: UmsatzsteuerApp_Monorepo_Starter/frontend-belegpruefung
         uses: actions/upload-pages-artifact@v3
         with:
-          path: "UmsatzsteuerApp_Monorepo_Starter/frontend-belegpruefung/dist"
+          path: "dist"
+
+      - name: Upload artifact (zip fallback)
+        working-directory: UmsatzsteuerApp_Monorepo_Starter/frontend-belegpruefung
+        if: failure()
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: "site.zip"
 
   deploy:
     needs: build
